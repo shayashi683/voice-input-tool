@@ -1,6 +1,6 @@
 # Voice Input Tool
 
-ReazonSpeech (sherpa-onnx) + OpenRouter/Cerebras GPT OSS による
+ReazonSpeech (sherpa-onnx) + LLM整形（OpenRouter/Cerebras GPT OSS または ローカルOllama）による
 macOS 向けローカル音声入力ツールです。
 
 ## 特徴
@@ -12,11 +12,13 @@ macOS 向けローカル音声入力ツールです。
 - ASR/VADモデルは起動直後にバックグラウンドで事前読み込みし、初回録音時の頭欠けを防ぐ
 - LLM補正オン/オフ切替可能（デフォルト: ON）
 - LLM補正ON時は、必ずLLM補正後のテキストだけを出力（未補正フォールバックなし）
+- 整形バックエンドを OpenRouter（クラウド）と Ollama（ローカル）から選択可能
 - OpenRouter 経由で Cerebras の GPT OSS を使用
   - model: `openai/gpt-oss-120b`
   - provider: `Cerebras`
   - provider fallback: 無効
   - `data_collection: deny` / `zdr: true`
+- Ollama バックエンドではテキストを外部に送らず、ローカルモデルだけで整形
 - macOS メニューバーアプリとして常駐
 - ネイティブ設定画面（PyObjC）でGUIから設定変更可能
 - グローバルホットキー対応（設定画面でカスタマイズ可能）
@@ -35,7 +37,7 @@ macOS 向けローカル音声入力ツールです。
 - Python 3.11 推奨（3.10以上でも動作想定）
 - ターミナル操作権限
 - 空き容量 2GB 以上（ASRモデルが約1.4GB）
-- LLM補正を使う場合: OpenRouter API Key
+- LLM補正を使う場合: OpenRouter API Key、または Ollama（ローカル実行）
 
 Python が入っているか確認します。`python3.11` があれば優先して使います。
 
@@ -134,6 +136,38 @@ chmod 600 .env
 `sk-or-v1-xxxxx` は各自のAPI Keyに置き換えてください。設定画面からAPI Keyを入力することもできます。その場合も `.env` に保存され、`config.json` には保存されません。
 
 LLM補正を使わない場合は、起動後にメニューバーの `LLM補正: ON/OFF` でOFFにしてください。API Key未設定のままLLM補正ONで使うと、補正に失敗してテキストが出力されません。
+
+API Keyを使わずローカルで整形したい場合は、次の「Ollamaで整形する」を参照してください。
+
+### 4b. Ollamaで整形する（API Key不要）
+
+OpenRouterの代わりに、ローカルの [Ollama](https://ollama.com) で整形できます。テキストが外部に出ないため、社外に出せない内容の入力にも使えます。
+
+```bash
+brew install ollama
+brew services start ollama      # または: ollama serve
+ollama pull qwen3:8b            # 好みのモデルを取得
+```
+
+設定画面の「整形バックエンド」で `Ollama（ローカル）` を選び、「Ollama モデル」で取得済みモデルを選択して保存します（サーバーURLの既定は `http://127.0.0.1:11434/v1`）。
+
+`config.json` から直接指定することもできます。
+
+```json
+{
+  "use_llm": true,
+  "llm_backend": "ollama",
+  "ollama_model": "qwen3:8b"
+}
+```
+
+動作確認は次のコマンドで行えます。
+
+```bash
+./start.sh --test --llm --llm-backend ollama
+```
+
+ローカルモデルはクラウドより遅いため、タイムアウトは既定60秒です（`ollama_timeout`）。`<think>` 形式の思考出力を返すモデルでも、思考部分は自動的に取り除いて入力します。
 
 ### 5. 起動前テストを行う
 
@@ -246,7 +280,7 @@ python voice_input.py --test --no-llm
 2. マイク入力をメモリ上に蓄積
 3. ホットキー/メニューで録音停止
 4. 停止後に録音全体をASRでテキスト化
-5. LLM補正ONの場合は Cerebras GPT OSS で整形
+5. LLM補正ONの場合は選択中のバックエンド（Cerebras GPT OSS / ローカルOllama）で整形
 6. 補正済みテキストを録音開始時の前面アプリへ入力
 
 重要な仕様:
@@ -280,7 +314,10 @@ python voice_input.py --test --no-llm
 | 設定項目 | 説明 | デフォルト |
 |---------|------|-----------|
 | LLM 句読点補正 | ON/OFF切替 | ON |
+| 整形バックエンド | OpenRouter（クラウド）/ Ollama（ローカル） | OpenRouter |
 | OpenRouter API Key | LLM補正用APIキー | `.env` から読み込み |
+| Ollama サーバー | Ollama の OpenAI 互換エンドポイント | `http://127.0.0.1:11434/v1` |
+| Ollama モデル | 取得済みモデルから選択（直接入力も可） | `qwen3:8b` |
 | 録音 開始/停止 | ホットキー設定 | Ctrl+Shift+Space |
 | 入力マイク | 使用するマイク。未選択時はシステムの既定入力 | 自動選択 |
 | LLM 補正プロンプト | LLM補正時のシステムプロンプト | 句読点挿入のみ |
@@ -293,10 +330,16 @@ python voice_input.py --test --no-llm
 
 | キー | 既定値 | 説明 |
 |------|--------|------|
+| `llm_backend` | `openrouter` | 整形バックエンド。`openrouter` / `ollama` |
 | `llm_model` | `openai/gpt-oss-120b` | OpenRouter のモデル名 |
-| `llm_provider_order` | `["Cerebras"]` | 使用する provider |
+| `llm_provider_order` | `["Cerebras"]` | OpenRouter で使用する provider |
+| `ollama_base_url` | `http://127.0.0.1:11434/v1` | Ollama の OpenAI 互換エンドポイント。`/v1` は自動補完 |
+| `ollama_model` | `qwen3:8b` | Ollama のモデル名 |
+| `ollama_timeout` | `60.0` | Ollama へのリクエストタイムアウト（秒） |
 
-LLMリクエストでは provider fallback を無効にしています。Cerebras が利用できない場合、LLM補正は失敗し、LLM補正ONでは出力されません。
+OpenRouterへのリクエストでは provider fallback を無効にしています。Cerebras が利用できない場合、LLM補正は失敗し、LLM補正ONでは出力されません。
+
+バックエンドは起動時に `--llm-backend openrouter|ollama` で一時的に上書きできます（`config.json` は変更しません）。
 
 ## ログとトラブルシュート
 
@@ -344,7 +387,9 @@ tail -n 120 ~/voice-input-tool/logs/voice-input-error.log
 | マイク入力できない | macOSの「マイク」権限で、起動に使っているアプリを許可して再起動 |
 | `Ctrl+Shift+Space` が効かない | 「アクセシビリティ」と、必要に応じて「入力監視」を許可して再起動。別アプリのショートカットと衝突していないかも確認 |
 | カーソル位置に入力されない | 「アクセシビリティ」権限を確認。貼り付け不可のアプリではクリップボードに残ります |
-| LLM補正で出力されない | `.env` の `OPENROUTER_API_KEY`、OpenRouterの残高、Cerebras providerの利用可否を確認。急ぎの場合はメニューでLLM補正をOFF |
+| LLM補正で出力されない（OpenRouter） | `.env` の `OPENROUTER_API_KEY`、OpenRouterの残高、Cerebras providerの利用可否を確認。急ぎの場合はメニューでLLM補正をOFF |
+| LLM補正で出力されない（Ollama） | `ollama serve` が動いているか、`ollama list` に設定したモデルがあるかを確認。`curl http://127.0.0.1:11434/v1/models` で疎通確認。遅い場合は `ollama_timeout` を延長 |
+| 設定画面の「Ollama モデル」が空 | Ollama未起動またはURL誤り。起動後にバックエンドを再選択すると再取得します（モデル名の直接入力も可） |
 
 ## ファイル構成
 
@@ -375,4 +420,5 @@ config.json          - ユーザー設定（.gitignore済み）
 ## モデル
 
 - ASR: sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01 (int8)
-- LLM: openai/gpt-oss-120b (OpenRouter経由、Cerebras固定・fallback無効)
+- LLM（OpenRouter）: openai/gpt-oss-120b (Cerebras固定・fallback無効)
+- LLM（Ollama）: 任意のローカルモデル（既定 `qwen3:8b`）

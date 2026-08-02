@@ -23,7 +23,7 @@ from voice_input_tool.audio_constants import BLOCK_SIZE, CHANNELS, SAMPLE_RATE
 from voice_input_tool.audio_devices import resolve_input_device
 from voice_input_tool.app_status import AppStatusController
 from voice_input_tool.config import DEFAULTS, load_config, save_config
-from voice_input_tool.llm_correction import configure_llm, llm_correct
+from voice_input_tool.llm_correction import BACKENDS, configure_llm, current_backend, llm_correct
 from voice_input_tool.log_utils import truncate_for_log
 from voice_input_tool.macos_text import (
     copy_to_clipboard,
@@ -637,6 +637,7 @@ class VoiceInputApp(rumps.App):
         self._register_hotkey()
         self._set_status(self._current_status(), force=True)
         log.info(f"設定更新: LLM={'ON' if self.use_llm else 'OFF'}, "
+                 f"バックエンド={current_backend()}, "
                  f"ホットキー={new_config.get('hotkey_record')}, "
                  f"入力マイク={new_config.get('input_device_id', '') or '自動選択'}")
 
@@ -782,6 +783,7 @@ def main():
     parser = argparse.ArgumentParser(description="Voice Input Tool - ReazonSpeech ASR")
     parser.add_argument("--llm", action="store_true", help="LLM句読点補正を有効化")
     parser.add_argument("--no-llm", action="store_true", help="LLM句読点補正を無効化")
+    parser.add_argument("--llm-backend", choices=list(BACKENDS), help="整形バックエンドを一時的に切り替え")
     parser.add_argument("--test", action="store_true", help="テストWAVファイルで動作確認")
     parser.add_argument("--headless", action="store_true", help="メニューバーなしで音声入力エンジンのみ起動")
     parser.add_argument("--settings", action="store_true", help="設定画面だけを開く")
@@ -792,7 +794,11 @@ def main():
     if args.settings:
         sys.exit(run_settings_window())
 
-    log.info(f"LLM補正: {'ON' if use_llm else 'OFF'}")
+    if args.llm_backend:
+        APP_CONFIG["llm_backend"] = args.llm_backend
+        configure_llm(APP_CONFIG)
+
+    log.info(f"LLM補正: {'ON' if use_llm else 'OFF'} (バックエンド: {current_backend()})")
 
     if args.test:
         log.info("ASRモデル読み込み開始")

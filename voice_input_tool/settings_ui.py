@@ -12,6 +12,7 @@ from Cocoa import (
     NSButton,
     NSButtonTypeSwitch,
     NSPopUpButton,
+    NSComboBox,
     NSTextView,
     NSScrollView,
     NSFont,
@@ -29,7 +30,19 @@ from Cocoa import (
     NSEventModifierFlagCommand,
 )
 from voice_input_tool.audio_devices import list_input_devices
-from voice_input_tool.config import load_config, save_config
+from voice_input_tool.config import DEFAULTS, load_config, save_config
+from voice_input_tool.llm_correction import (
+    BACKEND_OLLAMA,
+    BACKEND_OPENROUTER,
+    list_ollama_models,
+    normalize_backend,
+)
+
+# 整形バックエンドの表示名（表示順 = ポップアップの並び）
+BACKEND_ITEMS = [
+    (BACKEND_OPENROUTER, "OpenRouter（クラウド）"),
+    (BACKEND_OLLAMA, "Ollama（ローカル）"),
+]
 
 # pynput のキー名を表示用に変換
 DISPLAY_KEY_MAP = {
@@ -230,7 +243,10 @@ class SettingsWindowController(NSObject):
 
     window = objc.ivar()
     llm_checkbox = objc.ivar()
+    backend_popup = objc.ivar()
     api_key_field = objc.ivar()
+    ollama_url_field = objc.ivar()
+    ollama_model_combo = objc.ivar()
     hotkey_record_field = objc.ivar()
     input_device_popup = objc.ivar()
     prompt_textview = objc.ivar()
@@ -246,7 +262,7 @@ class SettingsWindowController(NSObject):
 
     def _build_window(self):
         config = load_config()
-        W, H = 500, 520
+        W, H = 500, 650
 
         self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(200, 200, W, H),
@@ -268,6 +284,22 @@ class SettingsWindowController(NSObject):
         content.addSubview_(self.llm_checkbox)
         y -= 40
 
+        # --- 整形バックエンド ---
+        content.addSubview_(_label("整形バックエンド", 20, y))
+        self.backend_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(170, y - 3, 220, 26),
+            False,
+        )
+        for backend, title in BACKEND_ITEMS:
+            self.backend_popup.addItemWithTitle_(title)
+            item = self.backend_popup.itemAtIndex_(self.backend_popup.numberOfItems() - 1)
+            item.setRepresentedObject_(backend)
+        self.backend_popup.setTarget_(self)
+        self.backend_popup.setAction_(b"backendChanged:")
+        self._select_backend(config.get("llm_backend", BACKEND_OPENROUTER))
+        content.addSubview_(self.backend_popup)
+        y -= 40
+
         # --- API Key ---
         content.addSubview_(_label("OpenRouter API Key", 20, y))
         self.api_key_field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(170, y - 2, 300, 24))
@@ -275,7 +307,29 @@ class SettingsWindowController(NSObject):
         self.api_key_field.setPlaceholderString_("sk-or-v1-...")
         self.api_key_field.setFont_(NSFont.systemFontOfSize_(12))
         content.addSubview_(self.api_key_field)
+        y -= 40
+
+        # --- Ollama サーバー ---
+        content.addSubview_(_label("Ollama サーバー", 20, y))
+        self.ollama_url_field = NSTextField.alloc().initWithFrame_(NSMakeRect(170, y - 2, 300, 24))
+        self.ollama_url_field.setStringValue_(config.get("ollama_base_url", ""))
+        self.ollama_url_field.setPlaceholderString_("http://127.0.0.1:11434/v1")
+        self.ollama_url_field.setFont_(NSFont.systemFontOfSize_(12))
+        content.addSubview_(self.ollama_url_field)
+        y -= 40
+
+        # --- Ollama モデル ---
+        content.addSubview_(_label("Ollama モデル", 20, y))
+        self.ollama_model_combo = NSComboBox.alloc().initWithFrame_(NSMakeRect(170, y - 3, 300, 26))
+        self.ollama_model_combo.setFont_(NSFont.systemFontOfSize_(12))
+        self.ollama_model_combo.setCompletes_(True)
+        self.ollama_model_combo.setPlaceholderString_("qwen3:8b")
+        self.ollama_model_combo.setStringValue_(config.get("ollama_model", ""))
+        content.addSubview_(self.ollama_model_combo)
+        content.addSubview_(_hint_label("ollama pull 済みのモデルから選択（直接入力も可）", 170, y - 22, 300))
         y -= 50
+
+        self._apply_backend_state()
 
         # --- ホットキー: 録音開始/停止 ---
         content.addSubview_(_label("録音 開始/停止", 20, y))
@@ -298,19 +352,19 @@ class SettingsWindowController(NSObject):
         # --- LLM Prompt ---
         content.addSubview_(_label("LLM 補正プロンプト", 20, y))
         y -= 10
-        scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(20, y - 140, 460, 150))
+        scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(20, y - 210, 460, 220))
         scroll.setHasVerticalScroller_(True)
         scroll.setBorderType_(3)  # NSBezelBorder
-        self.prompt_textview = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 440, 150))
+        self.prompt_textview = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 440, 220))
         self.prompt_textview.setString_(config.get("llm_prompt", ""))
         self.prompt_textview.setFont_(NSFont.systemFontOfSize_(12))
-        self.prompt_textview.setMinSize_((440, 150))
+        self.prompt_textview.setMinSize_((440, 220))
         self.prompt_textview.setMaxSize_((440, 10000))
         self.prompt_textview.setVerticallyResizable_(True)
         self.prompt_textview.textContainer().setWidthTracksTextView_(True)
         scroll.setDocumentView_(self.prompt_textview)
         content.addSubview_(scroll)
-        y -= 160
+        y -= 230
 
         # --- Buttons ---
         save_btn = NSButton.alloc().initWithFrame_(NSMakeRect(W - 200, 15, 80, 32))
@@ -335,6 +389,46 @@ class SettingsWindowController(NSObject):
         reset_btn.setTarget_(self)
         reset_btn.setAction_(b"resetClicked:")
         content.addSubview_(reset_btn)
+
+    def _select_backend(self, backend):
+        backend = normalize_backend(backend)
+        for index in range(self.backend_popup.numberOfItems()):
+            item = self.backend_popup.itemAtIndex_(index)
+            if str(item.representedObject() or "") == backend:
+                self.backend_popup.selectItemAtIndex_(index)
+                return
+        self.backend_popup.selectItemAtIndex_(0)
+
+    def _selected_backend(self):
+        item = self.backend_popup.selectedItem()
+        if item is None:
+            return BACKEND_OPENROUTER
+        return normalize_backend(item.representedObject())
+
+    def _apply_backend_state(self):
+        """選択中のバックエンドに関係ない入力欄はグレーアウトする"""
+        is_ollama = self._selected_backend() == BACKEND_OLLAMA
+        self.api_key_field.setEnabled_(not is_ollama)
+        self.ollama_url_field.setEnabled_(is_ollama)
+        self.ollama_model_combo.setEnabled_(is_ollama)
+        if is_ollama:
+            self._populate_ollama_models()
+
+    def _populate_ollama_models(self):
+        """Ollama から取得済みモデル一覧を候補として読み込む（失敗は無視）"""
+        self.ollama_model_combo.removeAllItems()
+        base_url = str(self.ollama_url_field.stringValue())
+        try:
+            models = list_ollama_models(base_url, timeout=2.0)
+        except Exception:
+            # Ollama 未起動でも設定自体は編集できるようにする（直接入力可）
+            return
+        if models:
+            self.ollama_model_combo.addItemsWithObjectValues_(models)
+
+    @objc.typedSelector(b"v@:@")
+    def backendChanged_(self, sender):
+        self._apply_backend_state()
 
     def _populate_input_devices(self, selected_device_id):
         self.input_device_popup.removeAllItems()
@@ -365,9 +459,14 @@ class SettingsWindowController(NSObject):
         selected_device = self.input_device_popup.selectedItem()
         if selected_device is not None and selected_device.representedObject() is not None:
             input_device_id = str(selected_device.representedObject())
+        ollama_url = str(self.ollama_url_field.stringValue()).strip()
+        ollama_model = str(self.ollama_model_combo.stringValue()).strip()
         config.update({
             "use_llm": self.llm_checkbox.state() == NSControlStateValueOn,
+            "llm_backend": self._selected_backend(),
             "openrouter_api_key": str(self.api_key_field.stringValue()),
+            "ollama_base_url": ollama_url or DEFAULTS["ollama_base_url"],
+            "ollama_model": ollama_model or DEFAULTS["ollama_model"],
             "hotkey_record": hotkey_val if hotkey_val else "<ctrl>+<shift>+<space>",
             "input_device_id": input_device_id,
             "llm_prompt": str(self.prompt_textview.string()),
@@ -391,8 +490,11 @@ class SettingsWindowController(NSObject):
 
     @objc.typedSelector(b"v@:@")
     def resetClicked_(self, sender):
-        from voice_input_tool.config import DEFAULTS
         self.llm_checkbox.setState_(NSControlStateValueOn if DEFAULTS["use_llm"] else NSControlStateValueOff)
+        self._select_backend(DEFAULTS["llm_backend"])
+        self.ollama_url_field.setStringValue_(DEFAULTS["ollama_base_url"])
+        self.ollama_model_combo.setStringValue_(DEFAULTS["ollama_model"])
+        self._apply_backend_state()
         self.hotkey_record_field.setHotkeyValue_(DEFAULTS["hotkey_record"])
         self._populate_input_devices(DEFAULTS["input_device_id"])
         self.prompt_textview.setString_(DEFAULTS["llm_prompt"])
@@ -407,7 +509,11 @@ class SettingsWindowController(NSObject):
         """ウィンドウを使い回す際、表示中の値を最新の設定で更新する"""
         config = load_config()
         self.llm_checkbox.setState_(NSControlStateValueOn if config["use_llm"] else NSControlStateValueOff)
+        self._select_backend(config.get("llm_backend", BACKEND_OPENROUTER))
         self.api_key_field.setStringValue_(config.get("openrouter_api_key", ""))
+        self.ollama_url_field.setStringValue_(config.get("ollama_base_url", ""))
+        self.ollama_model_combo.setStringValue_(config.get("ollama_model", ""))
+        self._apply_backend_state()
         self.hotkey_record_field.setHotkeyValue_(config.get("hotkey_record", "<ctrl>+<shift>+<space>"))
         self._populate_input_devices(config.get("input_device_id", ""))
         self.prompt_textview.setString_(config.get("llm_prompt", ""))

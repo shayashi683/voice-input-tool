@@ -17,9 +17,13 @@ DOTENV_PATH = os.path.join(CONFIG_DIR, ".env")
 
 DEFAULTS = {
     "use_llm": True,
+    "llm_backend": "openrouter",  # "openrouter" | "ollama"
     "openrouter_api_key": "",  # 保持はするが、ファイル保存はしない
     "llm_model": "openai/gpt-oss-120b",
     "llm_provider_order": ["Cerebras"],
+    "ollama_base_url": "http://127.0.0.1:11434/v1",
+    "ollama_model": "qwen3:8b",
+    "ollama_timeout": 60.0,
     "hotkey_record": "<ctrl>+<shift>+<space>",
     "input_device_id": "",
     "llm_prompt": (
