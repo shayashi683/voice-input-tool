@@ -20,6 +20,7 @@ macOS 向けローカル音声入力ツールです。
   - `data_collection: deny` / `zdr: true`
 - Ollama バックエンドではテキストを外部に送らず、ローカルモデルだけで整形
 - macOS メニューバーアプリとして常駐
+- Raycast から起動/終了可能（Script Command 同梱）
 - ネイティブ設定画面（PyObjC）でGUIから設定変更可能
 - グローバルホットキー対応（設定画面でカスタマイズ可能）
 - 認識結果はカーソル位置に入力（貼り付け不可時は補正済みテキストをクリップボードに保持）
@@ -230,6 +231,30 @@ chmod +x start.sh
 
 ログイン時に自動起動したい場合は、macOSの「システム設定」→「一般」→「ログイン項目」に `VoiceInputTool.app` を追加してください。
 
+### 9b. Raycastから起動する
+
+`raycast/` に Raycast の Script Command を同梱しています。
+
+| コマンド | ファイル | 動作 |
+|---------|---------|------|
+| `Voice Input Tool を起動` | `raycast/voice-input-start.sh` | 未起動なら起動。起動済みなら何もしない |
+| `Voice Input Tool を終了` | `raycast/voice-input-quit.sh` | 常駐プロセスを SIGTERM で終了 |
+
+登録手順:
+
+1. Raycast を開き `⌘,` で設定を開く
+2. `Extensions` タブ → 左下の `+` → `Add Script Directory`
+3. このリポジトリの `raycast` フォルダを選択
+
+登録すると Raycast の検索窓から `Voice Input Tool を起動` で起動できます。よく使う場合は、コマンドを選んで `Record Hotkey` でホットキー、`Alias` で短縮名（例: `vi`）を割り当てられます。
+
+起動スクリプトは次の順で起動方法を選びます。
+
+1. `~/Applications/VoiceInputTool.app` があれば `open` で起動（マイク/アクセシビリティ権限がアプリ自身に紐づくため、こちらが推奨）
+2. 無ければ `start.sh` を Raycast のプロセスから切り離して起動（標準出力は `logs/raycast-start.log`）
+
+> 注意: 2. の場合、マイク・アクセシビリティ・入力監視の権限は起動元の `Raycast` に紐づきます。初回は権限ダイアログで `Raycast` を許可してください。権限をアプリ側に持たせたい場合は `~/Applications/VoiceInputTool.app` を配置してから使ってください。
+
 ### 10. 更新手順
 
 社内Gitから取得している場合:
@@ -390,6 +415,8 @@ tail -n 120 ~/voice-input-tool/logs/voice-input-error.log
 | LLM補正で出力されない（OpenRouter） | `.env` の `OPENROUTER_API_KEY`、OpenRouterの残高、Cerebras providerの利用可否を確認。急ぎの場合はメニューでLLM補正をOFF |
 | LLM補正で出力されない（Ollama） | `ollama serve` が動いているか、`ollama list` に設定したモデルがあるかを確認。`curl http://127.0.0.1:11434/v1/models` で疎通確認。遅い場合は `ollama_timeout` を延長 |
 | 設定画面の「Ollama モデル」が空 | Ollama未起動またはURL誤り。起動後にバックエンドを再選択すると再取得します（モデル名の直接入力も可） |
+| Raycastにコマンドが出てこない | `raycast` フォルダを Script Directory に登録済みか、`chmod +x raycast/*.sh` されているか確認 |
+| Raycastから起動するとマイク/ホットキーが使えない | `~/Applications/VoiceInputTool.app` が無い場合、権限は起動元の `Raycast` に紐づきます。システム設定でRaycastを許可するか、`.app` を配置してください |
 
 ## ファイル構成
 
@@ -399,6 +426,7 @@ voice_input_tool/    - Python実装（engine/ASR/LLM/設定UI/ネイティブ連
 native/              - macOSネイティブ常駐アプリ/ランチャーのソース
 packaging/           - VoiceInputTool.app 用 Info.plist
 launch-agents/       - 自動起動用 LaunchAgent サンプル
+raycast/             - Raycast Script Command（起動/終了）
 assets/              - メニューバー用アイコン素材
 start.sh             - CLI起動用シェルスクリプト
 requirements.txt     - Python依存パッケージ一覧
