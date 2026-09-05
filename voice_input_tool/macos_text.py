@@ -18,13 +18,19 @@ try:
         CGEventSetFlags,
         kAXTrustedCheckOptionPrompt,
         kCGEventFlagMaskCommand,
+        kCGEventFlagMaskShift,
         kCGHIDEventTap,
     )
-    from AppKit import NSApplicationActivateIgnoringOtherApps, NSWorkspace
+    from AppKit import NSApplicationActivateIgnoringOtherApps, NSRunningApplication, NSWorkspace
 
     HAS_CURSOR_INSERT = True
 except ImportError:
     HAS_CURSOR_INSERT = False
+
+
+# キーイベントを連続送信するときの間隔。詰めすぎると取りこぼすアプリがある
+KEY_EVENT_INTERVAL = 0.003
+RETURN_KEYCODE = 36
 
 
 def get_frontmost_application():
@@ -35,6 +41,29 @@ def get_frontmost_application():
     except Exception as e:
         log.warning("前面アプリ取得エラー: %s", e)
         return None
+
+
+def running_application_for_pid(pid):
+    """pid から NSRunningApplication を得る（ネイティブ経由で pid だけ渡された場合用）"""
+    if not HAS_CURSOR_INSERT or not pid:
+        return None
+    try:
+        return NSRunningApplication.runningApplicationWithProcessIdentifier_(int(pid))
+    except Exception as e:
+        log.warning("対象アプリの取得エラー pid=%s: %s", pid, e)
+        return None
+
+
+def activate_application(target_app):
+    """対象アプリを前面に戻す。パネルが自プロセスをアクティブ化した後の復帰に使う"""
+    if target_app is None:
+        return False
+    try:
+        target_app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+        return True
+    except Exception as e:
+        log.warning("対象アプリの再アクティブ化に失敗しました: %s", e)
+        return False
 
 
 def insert_text_at_cursor(text, target_app=None):
@@ -113,8 +142,20 @@ def post_key_event(keycode, key_down, flags=0, pid=None):
 
 
 def type_text_directly(text, target_app=None):
+    """Unicode 文字列をキーイベントとして 1 文字ずつ打ち込む。
+
+    改行は Unicode の "\n" として打つと Return キー扱いになり Slack 等で送信されて
+    しまうため、Shift+Return のキーイベントとして送る（多くのチャットで改行になる）。
+    """
     pid = target_pid(target_app)
     for char in text:
+        if char == "\n":
+            post_key_event(RETURN_KEYCODE, True, kCGEventFlagMaskShift, pid=pid)
+            post_key_event(RETURN_KEYCODE, False, kCGEventFlagMaskShift, pid=pid)
+            time.sleep(KEY_EVENT_INTERVAL)
+            continue
+        if char == "\r":
+            continue
         event_down = CGEventCreateKeyboardEvent(None, 0, True)
         CGEventKeyboardSetUnicodeString(event_down, len(char), char)
         if pid:
@@ -128,7 +169,7 @@ def type_text_directly(text, target_app=None):
             CGEventPostToPid(pid, event_up)
         else:
             CGEventPost(kCGHIDEventTap, event_up)
-        time.sleep(0.003)
+        time.sleep(KEY_EVENT_INTERVAL)
     log.info("直接文字入力イベント送信: pid=%s length=%d", pid, len(text))
 
 

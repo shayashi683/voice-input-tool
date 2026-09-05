@@ -39,6 +39,7 @@ def write_status(status, title, record_title, use_llm):
         "hearing": "•••",
         "processing": "📝",
         "correcting": "AI",
+        "polishing": "✨",
         "inserting": "⌨",
     }
     payload = {

@@ -134,6 +134,9 @@ class AppStatusController:
             "hearing": ("", f"録音停止・音声入力中… ({hotkey_display})", TYPING_INDICATOR_ICON_FRAMES),
             "processing": ("📝", "音声認識中…", None),
             "correcting": ("🧠", "LLM補正中…", None),
+            "polishing": ("✨", "文章を整形中…", None),
+            # パネルで Enter/Esc を待っている。この間にホットキーを押すと新しい録音が始まる
+            "confirm": ("✅", f"確認待ち・録音開始 ({hotkey_display})", None),
             "inserting": ("⌨️", "カーソル位置へ入力中…", None),
         }
         return states.get(status, states["idle"])

@@ -3,13 +3,58 @@
 #import <Carbon/Carbon.h>
 #include <unistd.h>
 
-static NSString * const WorkDir = @"/Users/shogohayashi/voice-input-tool";
-static NSString * const PythonPath = @"/Users/shogohayashi/voice-input-tool/.venv-framework/bin/python3";
-static NSString * const ScriptPath = @"/Users/shogohayashi/voice-input-tool/voice_input.py";
-static NSString * const CommandFilePath = @"/Users/shogohayashi/voice-input-tool/logs/voice-input-command.txt";
-static NSString * const OutputFilePath = @"/Users/shogohayashi/voice-input-tool/logs/voice-input-output.jsonl";
-static NSString * const StatusFilePath = @"/Users/shogohayashi/voice-input-tool/logs/voice-input-status.json";
-static NSString * const PasteReadyPath = @"/Users/shogohayashi/voice-input-tool/logs/native-paste-ready.txt";
+// リポジトリの場所は .app の中からは辿れないため、ビルド時に
+// -DVIT_WORK_DIR='"/path/to/repo"' で埋め込む（packaging/build_app.sh が渡す）。
+// 埋め込みが無い場合や .app だけを別マシンへ持ってきた場合に備えて、
+// 環境変数と既定の配置場所も順に見る
+#ifndef VIT_WORK_DIR
+#define VIT_WORK_DIR ""
+#endif
+
+static NSString * const WorkDirEnvKey = @"VOICE_INPUT_TOOL_DIR";
+
+static BOOL LooksLikeWorkDir(NSString *path) {
+    if ([path length] == 0) {
+        return NO;
+    }
+    NSString *script = [path stringByAppendingPathComponent:@"voice_input.py"];
+    return [[NSFileManager defaultManager] fileExistsAtPath:script];
+}
+
+static NSString *WorkDir(void) {
+    static NSString *resolved = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *fromEnv = [[[NSProcessInfo processInfo] environment] objectForKey:WorkDirEnvKey];
+        NSString *fallback = [NSHomeDirectory() stringByAppendingPathComponent:@"voice-input-tool"];
+        NSArray<NSString *> *candidates = @[
+            fromEnv ?: @"",   // 開発中に別のチェックアウトを指したいとき
+            @VIT_WORK_DIR,    // ビルドしたマシンでのリポジトリの場所
+            fallback,         // READMEの既定の配置
+        ];
+        for (NSString *candidate in candidates) {
+            NSString *path = [candidate stringByExpandingTildeInPath];
+            if (LooksLikeWorkDir(path)) {
+                resolved = [path copy];
+                return;
+            }
+        }
+        // どれも見つからない場合でもログ出力先などは必要なので既定値を使う
+        resolved = [fallback copy];
+    });
+    return resolved;
+}
+
+static NSString *WorkPath(NSString *relative) {
+    return [WorkDir() stringByAppendingPathComponent:relative];
+}
+
+static NSString *PythonPath(void) { return WorkPath(@".venv-framework/bin/python3"); }
+static NSString *ScriptPath(void) { return WorkPath(@"voice_input.py"); }
+static NSString *CommandFilePath(void) { return WorkPath(@"logs/voice-input-command.txt"); }
+static NSString *OutputFilePath(void) { return WorkPath(@"logs/voice-input-output.jsonl"); }
+static NSString *StatusFilePath(void) { return WorkPath(@"logs/voice-input-status.json"); }
+static NSString *PasteReadyPath(void) { return WorkPath(@"logs/native-paste-ready.txt"); }
 
 static void EnsureParentDirectory(NSString *path) {
     NSString *directory = [path stringByDeletingLastPathComponent];
@@ -20,7 +65,7 @@ static void EnsureParentDirectory(NSString *path) {
 }
 
 static void NativeLog(NSString *message) {
-    NSString *path = [WorkDir stringByAppendingPathComponent:@"logs/native-status.log"];
+    NSString *path = WorkPath(@"logs/native-status.log");
     EnsureParentDirectory(path);
     NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], message];
     NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
@@ -71,6 +116,9 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     NativeLog(@"applicationDidFinishLaunching");
+    NativeLog([NSString stringWithFormat:@"work dir: %@%@",
+               WorkDir(),
+               LooksLikeWorkDir(WorkDir()) ? @"" : @" (voice_input.py が見つかりません)"]);
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
     [self requestAccessibilityIfNeeded];
     [self setupStatusItem];
@@ -140,7 +188,7 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
 }
 
 - (NSDictionary *)loadConfig {
-    NSString *configPath = [WorkDir stringByAppendingPathComponent:@"config.json"];
+    NSString *configPath = WorkPath(@"config.json");
     NSData *data = [NSData dataWithContentsOfFile:configPath];
     if (!data) {
         return @{};
@@ -266,11 +314,11 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
     NativeLog(@"startEngine");
 
     NSTask *task = [[NSTask alloc] init];
-    task.executableURL = [NSURL fileURLWithPath:PythonPath];
-    task.arguments = @[ScriptPath, @"--headless"];
-    task.currentDirectoryURL = [NSURL fileURLWithPath:WorkDir];
-    task.standardOutput = [self appendHandleForPath:[WorkDir stringByAppendingPathComponent:@"logs/native-engine.out.log"]];
-    task.standardError = [self appendHandleForPath:[WorkDir stringByAppendingPathComponent:@"logs/native-engine.err.log"]];
+    task.executableURL = [NSURL fileURLWithPath:PythonPath()];
+    task.arguments = @[ScriptPath(), @"--headless"];
+    task.currentDirectoryURL = [NSURL fileURLWithPath:WorkDir()];
+    task.standardOutput = [self appendHandleForPath:WorkPath(@"logs/native-engine.out.log")];
+    task.standardError = [self appendHandleForPath:WorkPath(@"logs/native-engine.err.log")];
     task.terminationHandler = ^(NSTask *finishedTask) {
         NativeLog([NSString stringWithFormat:@"engine exited: status=%d", finishedTask.terminationStatus]);
     };
@@ -296,12 +344,12 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
 }
 
 - (void)prepareOutputPolling {
-    EnsureParentDirectory(OutputFilePath);
-    if (![[NSFileManager defaultManager] fileExistsAtPath:OutputFilePath]) {
-        [[NSFileManager defaultManager] createFileAtPath:OutputFilePath contents:nil attributes:nil];
+    EnsureParentDirectory(OutputFilePath());
+    if (![[NSFileManager defaultManager] fileExistsAtPath:OutputFilePath()]) {
+        [[NSFileManager defaultManager] createFileAtPath:OutputFilePath() contents:nil attributes:nil];
     }
 
-    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:OutputFilePath error:nil];
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:OutputFilePath() error:nil];
     self.outputOffset = [[attrs objectForKey:NSFileSize] unsignedLongLongValue];
     self.outputTimer = [NSTimer scheduledTimerWithTimeInterval:0.2
                                                         target:self
@@ -318,7 +366,7 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
     [self pollStatusFile];
     [self animateStatusIndicator];
 
-    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:OutputFilePath error:nil];
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:OutputFilePath() error:nil];
     unsigned long long size = [[attrs objectForKey:NSFileSize] unsignedLongLongValue];
     if (size < self.outputOffset) {
         self.outputOffset = 0;
@@ -327,7 +375,7 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
         return;
     }
 
-    NSFileHandle *handle = [NSFileHandle fileHandleForReadingAtPath:OutputFilePath];
+    NSFileHandle *handle = [NSFileHandle fileHandleForReadingAtPath:OutputFilePath()];
     if (!handle) {
         return;
     }
@@ -348,7 +396,7 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
 }
 
 - (void)pollStatusFile {
-    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:StatusFilePath error:nil];
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:StatusFilePath() error:nil];
     NSDate *modified = [attrs objectForKey:NSFileModificationDate];
     if (!modified) {
         return;
@@ -360,7 +408,7 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
     }
     self.lastStatusModified = modifiedTime;
 
-    NSData *data = [NSData dataWithContentsOfFile:StatusFilePath];
+    NSData *data = [NSData dataWithContentsOfFile:StatusFilePath()];
     if (!data) {
         return;
     }
@@ -423,9 +471,9 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
 
 - (void)writePasteReadyHeartbeat {
     self.lastReadyHeartbeat = [[NSDate date] timeIntervalSince1970];
-    EnsureParentDirectory(PasteReadyPath);
+    EnsureParentDirectory(PasteReadyPath());
     NSString *content = [NSString stringWithFormat:@"%f\n", self.lastReadyHeartbeat];
-    [content writeToFile:PasteReadyPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [content writeToFile:PasteReadyPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
 - (void)handleOutputLine:(NSString *)line {
@@ -534,7 +582,7 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
 }
 
 - (BOOL)sendCommand:(NSString *)command targetPid:(pid_t)targetPid {
-    NSFileHandle *handle = [self appendHandleForPath:CommandFilePath];
+    NSFileHandle *handle = [self appendHandleForPath:CommandFilePath()];
     if (!handle) {
         return NO;
     }
@@ -608,11 +656,11 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
 - (void)openSettings:(id)sender {
     NativeLog(@"openSettings");
     NSTask *task = [[NSTask alloc] init];
-    task.executableURL = [NSURL fileURLWithPath:PythonPath];
-    task.arguments = @[ScriptPath, @"--settings"];
-    task.currentDirectoryURL = [NSURL fileURLWithPath:WorkDir];
-    task.standardOutput = [self appendHandleForPath:[WorkDir stringByAppendingPathComponent:@"logs/native-settings.out.log"]];
-    task.standardError = [self appendHandleForPath:[WorkDir stringByAppendingPathComponent:@"logs/native-settings.err.log"]];
+    task.executableURL = [NSURL fileURLWithPath:PythonPath()];
+    task.arguments = @[ScriptPath(), @"--settings"];
+    task.currentDirectoryURL = [NSURL fileURLWithPath:WorkDir()];
+    task.standardOutput = [self appendHandleForPath:WorkPath(@"logs/native-settings.out.log")];
+    task.standardError = [self appendHandleForPath:WorkPath(@"logs/native-settings.err.log")];
 
     __weak AppDelegate *weakSelf = self;
     task.terminationHandler = ^(NSTask *finishedTask) {
@@ -644,7 +692,7 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
 - (void)applicationWillTerminate:(NSNotification *)notification {
     NativeLog(@"applicationWillTerminate");
     [self.outputTimer invalidate];
-    [[NSFileManager defaultManager] removeItemAtPath:PasteReadyPath error:nil];
+    [[NSFileManager defaultManager] removeItemAtPath:PasteReadyPath() error:nil];
     if (self.hotKeyRef) {
         UnregisterEventHotKey(self.hotKeyRef);
         self.hotKeyRef = NULL;

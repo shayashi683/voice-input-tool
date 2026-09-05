@@ -118,6 +118,25 @@ def _hint_label(text, x, y, width=300):
     return label
 
 
+def _add_prompt_field(content, title, text, y, height=180):
+    """ラベル付きの複数行テキスト欄を追加し、(テキストビュー, 次のy) を返す"""
+    content.addSubview_(_label(title, 20, y, 300))
+    top = y - 6
+    scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(20, top - height, 460, height))
+    scroll.setHasVerticalScroller_(True)
+    scroll.setBorderType_(3)  # NSBezelBorder
+    textview = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 440, height))
+    textview.setString_(text)
+    textview.setFont_(NSFont.systemFontOfSize_(12))
+    textview.setMinSize_((440, height))
+    textview.setMaxSize_((440, 10000))
+    textview.setVerticallyResizable_(True)
+    textview.textContainer().setWidthTracksTextView_(True)
+    scroll.setDocumentView_(textview)
+    content.addSubview_(scroll)
+    return textview, top - height - 20
+
+
 class HotkeyField(NSTextField):
     """キー入力をキャプチャするカスタムテキストフィールド"""
     _hotkey_value = objc.ivar()
@@ -243,6 +262,7 @@ class SettingsWindowController(NSObject):
 
     window = objc.ivar()
     llm_checkbox = objc.ivar()
+    final_polish_checkbox = objc.ivar()
     backend_popup = objc.ivar()
     api_key_field = objc.ivar()
     ollama_url_field = objc.ivar()
@@ -250,6 +270,7 @@ class SettingsWindowController(NSObject):
     hotkey_record_field = objc.ivar()
     input_device_popup = objc.ivar()
     prompt_textview = objc.ivar()
+    final_polish_prompt_textview = objc.ivar()
     on_save_callback = objc.ivar()
 
     def initWithCallback_(self, callback):
@@ -262,7 +283,7 @@ class SettingsWindowController(NSObject):
 
     def _build_window(self):
         config = load_config()
-        W, H = 500, 650
+        W, H = 500, 880
 
         self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(200, 200, W, H),
@@ -275,13 +296,24 @@ class SettingsWindowController(NSObject):
         content = self.window.contentView()
         y = H - 50
 
-        # --- LLM 補正 ---
-        content.addSubview_(_label("LLM 句読点補正", 20, y))
-        self.llm_checkbox = NSButton.alloc().initWithFrame_(NSMakeRect(170, y - 2, 200, 24))
+        # --- LLM 補正（発話ごと） ---
+        content.addSubview_(_label("LLM 句読点補正", 20, y, 145))
+        self.llm_checkbox = NSButton.alloc().initWithFrame_(NSMakeRect(170, y - 2, 300, 24))
         self.llm_checkbox.setButtonType_(NSButtonTypeSwitch)
-        self.llm_checkbox.setTitle_("有効")
+        self.llm_checkbox.setTitle_("発話ごとに補正する")
         self.llm_checkbox.setState_(NSControlStateValueOn if config["use_llm"] else NSControlStateValueOff)
         content.addSubview_(self.llm_checkbox)
+        y -= 40
+
+        # --- 全文整形（録音停止後） ---
+        content.addSubview_(_label("文章整形", 20, y, 145))
+        self.final_polish_checkbox = NSButton.alloc().initWithFrame_(NSMakeRect(170, y - 2, 300, 24))
+        self.final_polish_checkbox.setButtonType_(NSButtonTypeSwitch)
+        self.final_polish_checkbox.setTitle_("録音停止後に全文を整形して置き換える")
+        self.final_polish_checkbox.setState_(
+            NSControlStateValueOn if config.get("final_polish", False) else NSControlStateValueOff
+        )
+        content.addSubview_(self.final_polish_checkbox)
         y -= 40
 
         # --- 整形バックエンド ---
@@ -349,22 +381,16 @@ class SettingsWindowController(NSObject):
         content.addSubview_(self.input_device_popup)
         y -= 45
 
-        # --- LLM Prompt ---
-        content.addSubview_(_label("LLM 補正プロンプト", 20, y))
-        y -= 10
-        scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(20, y - 210, 460, 220))
-        scroll.setHasVerticalScroller_(True)
-        scroll.setBorderType_(3)  # NSBezelBorder
-        self.prompt_textview = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 440, 220))
-        self.prompt_textview.setString_(config.get("llm_prompt", ""))
-        self.prompt_textview.setFont_(NSFont.systemFontOfSize_(12))
-        self.prompt_textview.setMinSize_((440, 220))
-        self.prompt_textview.setMaxSize_((440, 10000))
-        self.prompt_textview.setVerticallyResizable_(True)
-        self.prompt_textview.textContainer().setWidthTracksTextView_(True)
-        scroll.setDocumentView_(self.prompt_textview)
-        content.addSubview_(scroll)
-        y -= 230
+        # --- プロンプト（発話ごとの補正 / 停止後の全文整形） ---
+        self.prompt_textview, y = _add_prompt_field(
+            content, "LLM 補正プロンプト（発話ごと）", config.get("llm_prompt", ""), y
+        )
+        self.final_polish_prompt_textview, y = _add_prompt_field(
+            content,
+            "文章整形プロンプト（録音停止後）",
+            config.get("final_polish_prompt", ""),
+            y,
+        )
 
         # --- Buttons ---
         save_btn = NSButton.alloc().initWithFrame_(NSMakeRect(W - 200, 15, 80, 32))
@@ -463,6 +489,7 @@ class SettingsWindowController(NSObject):
         ollama_model = str(self.ollama_model_combo.stringValue()).strip()
         config.update({
             "use_llm": self.llm_checkbox.state() == NSControlStateValueOn,
+            "final_polish": self.final_polish_checkbox.state() == NSControlStateValueOn,
             "llm_backend": self._selected_backend(),
             "openrouter_api_key": str(self.api_key_field.stringValue()),
             "ollama_base_url": ollama_url or DEFAULTS["ollama_base_url"],
@@ -470,6 +497,7 @@ class SettingsWindowController(NSObject):
             "hotkey_record": hotkey_val if hotkey_val else "<ctrl>+<shift>+<space>",
             "input_device_id": input_device_id,
             "llm_prompt": str(self.prompt_textview.string()),
+            "final_polish_prompt": str(self.final_polish_prompt_textview.string()),
         })
         save_config(config)
         if self.on_save_callback:
@@ -491,6 +519,9 @@ class SettingsWindowController(NSObject):
     @objc.typedSelector(b"v@:@")
     def resetClicked_(self, sender):
         self.llm_checkbox.setState_(NSControlStateValueOn if DEFAULTS["use_llm"] else NSControlStateValueOff)
+        self.final_polish_checkbox.setState_(
+            NSControlStateValueOn if DEFAULTS["final_polish"] else NSControlStateValueOff
+        )
         self._select_backend(DEFAULTS["llm_backend"])
         self.ollama_url_field.setStringValue_(DEFAULTS["ollama_base_url"])
         self.ollama_model_combo.setStringValue_(DEFAULTS["ollama_model"])
@@ -498,6 +529,7 @@ class SettingsWindowController(NSObject):
         self.hotkey_record_field.setHotkeyValue_(DEFAULTS["hotkey_record"])
         self._populate_input_devices(DEFAULTS["input_device_id"])
         self.prompt_textview.setString_(DEFAULTS["llm_prompt"])
+        self.final_polish_prompt_textview.setString_(DEFAULTS["final_polish_prompt"])
 
     def show(self):
         self._refresh_from_config()
@@ -509,6 +541,9 @@ class SettingsWindowController(NSObject):
         """ウィンドウを使い回す際、表示中の値を最新の設定で更新する"""
         config = load_config()
         self.llm_checkbox.setState_(NSControlStateValueOn if config["use_llm"] else NSControlStateValueOff)
+        self.final_polish_checkbox.setState_(
+            NSControlStateValueOn if config.get("final_polish", False) else NSControlStateValueOff
+        )
         self._select_backend(config.get("llm_backend", BACKEND_OPENROUTER))
         self.api_key_field.setStringValue_(config.get("openrouter_api_key", ""))
         self.ollama_url_field.setStringValue_(config.get("ollama_base_url", ""))
@@ -517,3 +552,4 @@ class SettingsWindowController(NSObject):
         self.hotkey_record_field.setHotkeyValue_(config.get("hotkey_record", "<ctrl>+<shift>+<space>"))
         self._populate_input_devices(config.get("input_device_id", ""))
         self.prompt_textview.setString_(config.get("llm_prompt", ""))
+        self.final_polish_prompt_textview.setString_(config.get("final_polish_prompt", ""))

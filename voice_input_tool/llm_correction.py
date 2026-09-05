@@ -30,12 +30,20 @@ DEFAULT_OLLAMA_TIMEOUT = 60.0
 
 # OpenRouter は 10 秒で見切る（クラウド側が遅い場合は待つ意味が薄い）
 OPENROUTER_TIMEOUT = 10.0
+# 録音停止後の全文整形は入力も出力も長くなるため、区間ごとの補正より長く待つ
+OPENROUTER_LONG_FORM_TIMEOUT = 30.0
+
+# 区間ごとの補正で許す出力トークンの上限
+MAX_OUTPUT_TOKENS = 2048
+# 全文整形で許す出力トークンの上限（数分話した内容が一度に入る）
+MAX_OUTPUT_TOKENS_LONG_FORM = 8192
 
 # ローカルモデルは推論内容を <think>...</think> で吐くものがあるため取り除く
 _THINK_BLOCK_RE = re.compile(r"<(think|thinking)>.*?</\1>", re.DOTALL | re.IGNORECASE)
 
 _CLIENTS = {}
 _LLM_PROMPT = ""
+_FINAL_POLISH_PROMPT = ""
 _LLM_BACKEND = BACKEND_OPENROUTER
 _LLM_MODEL = "openai/gpt-oss-120b"
 _LLM_PROVIDER_ORDER = ["Cerebras"]
@@ -64,9 +72,10 @@ def normalize_ollama_base_url(value):
 
 
 def configure_llm(config):
-    global _LLM_PROMPT, _LLM_BACKEND, _LLM_MODEL, _LLM_PROVIDER_ORDER, _OPENROUTER_API_KEY
-    global _OLLAMA_BASE_URL, _OLLAMA_MODEL, _OLLAMA_TIMEOUT
+    global _LLM_PROMPT, _FINAL_POLISH_PROMPT, _LLM_BACKEND, _LLM_MODEL, _LLM_PROVIDER_ORDER
+    global _OPENROUTER_API_KEY, _OLLAMA_BASE_URL, _OLLAMA_MODEL, _OLLAMA_TIMEOUT
     _LLM_PROMPT = config["llm_prompt"]
+    _FINAL_POLISH_PROMPT = config.get("final_polish_prompt", "") or _LLM_PROMPT
     _LLM_BACKEND = normalize_backend(config.get("llm_backend", _LLM_BACKEND))
     _LLM_MODEL = config.get("llm_model", _LLM_MODEL)
     _LLM_PROVIDER_ORDER = config.get("llm_provider_order", _LLM_PROVIDER_ORDER)
@@ -81,6 +90,10 @@ def configure_llm(config):
 
 def current_backend():
     return _LLM_BACKEND
+
+
+def final_polish_prompt():
+    return _FINAL_POLISH_PROMPT
 
 
 def get_client(base_url, api_key, timeout):
@@ -98,8 +111,8 @@ def get_client(base_url, api_key, timeout):
     return client
 
 
-def get_openrouter_client(api_key):
-    return get_client("https://openrouter.ai/api/v1", api_key, OPENROUTER_TIMEOUT)
+def get_openrouter_client(api_key, timeout=OPENROUTER_TIMEOUT):
+    return get_client("https://openrouter.ai/api/v1", api_key, timeout)
 
 
 def get_ollama_client(base_url=None, timeout=None):
@@ -120,29 +133,38 @@ def list_ollama_models(base_url=None, timeout=5.0):
     return sorted(str(m.id) for m in (getattr(models, "data", None) or []))
 
 
-def llm_correct(text, api_key=None):
-    """句読点を挿入する。未補正テキストへのフォールバックはしない。"""
+def llm_correct(text, api_key=None, prompt=None, long_form=False):
+    """テキストを補正する。未補正テキストへのフォールバックはしない。
+
+    prompt を渡すと設定の句読点補正プロンプトの代わりに使う。
+    long_form=True は録音停止後の全文整形向けで、待ち時間と出力上限を広げる。
+    """
     if not text:
         return ""
     if not HAS_OPENAI:
         raise LLMCorrectionError("openai パッケージがインストールされていません")
 
+    prompt = prompt or _LLM_PROMPT
     if _LLM_BACKEND == BACKEND_OLLAMA:
-        return _correct_with_ollama(text)
-    return _correct_with_openrouter(text, api_key)
+        return _correct_with_ollama(text, prompt, long_form)
+    return _correct_with_openrouter(text, api_key, prompt, long_form)
 
 
-def _max_tokens_for(text):
-    return min(2048, max(1024, len(text) + 256))
+def _max_tokens_for(text, long_form=False):
+    cap = MAX_OUTPUT_TOKENS_LONG_FORM if long_form else MAX_OUTPUT_TOKENS
+    # 日本語は1文字あたり1トークンを超えることがあるため、全文整形では余裕を持たせる
+    estimated = len(text) * 2 + 256 if long_form else len(text) + 256
+    return min(cap, max(1024, estimated))
 
 
-def _correct_with_openrouter(text, api_key=None):
+def _correct_with_openrouter(text, api_key=None, prompt=None, long_form=False):
     key = api_key or _OPENROUTER_API_KEY or os.environ.get("OPENROUTER_API_KEY")
     if not key:
         raise LLMCorrectionError("OPENROUTER_API_KEY が設定されていません")
 
-    client = get_openrouter_client(key)
-    max_tokens = _max_tokens_for(text)
+    timeout = OPENROUTER_LONG_FORM_TIMEOUT if long_form else OPENROUTER_TIMEOUT
+    client = get_openrouter_client(key, timeout)
+    max_tokens = _max_tokens_for(text, long_form)
     extra_body = {
         "data_collection": "deny",
         "zdr": True,
@@ -159,13 +181,15 @@ def _correct_with_openrouter(text, api_key=None):
     }
 
     log.info(
-        "LLM補正リクエスト: backend=openrouter model=%s providers=%s text_len=%d key=%s prompt_len=%d max_tokens=%d text=%r",
+        "LLM補正リクエスト: backend=openrouter model=%s providers=%s long_form=%s text_len=%d key=%s prompt_len=%d max_tokens=%d timeout=%.1f text=%r",
         _LLM_MODEL,
         _LLM_PROVIDER_ORDER,
+        long_form,
         len(text),
         mask_secret(key),
-        len(_LLM_PROMPT),
+        len(prompt),
         max_tokens,
+        timeout,
         truncate_for_log(text, 300),
     )
 
@@ -173,22 +197,24 @@ def _correct_with_openrouter(text, api_key=None):
         client,
         model=_LLM_MODEL,
         text=text,
+        prompt=prompt,
         max_tokens=max_tokens,
         extra_body=extra_body,
         backend=BACKEND_OPENROUTER,
     )
 
 
-def _correct_with_ollama(text):
+def _correct_with_ollama(text, prompt=None, long_form=False):
     client = get_ollama_client()
-    max_tokens = _max_tokens_for(text)
+    max_tokens = _max_tokens_for(text, long_form)
 
     log.info(
-        "LLM補正リクエスト: backend=ollama base_url=%s model=%s text_len=%d prompt_len=%d max_tokens=%d timeout=%.1f text=%r",
+        "LLM補正リクエスト: backend=ollama base_url=%s model=%s long_form=%s text_len=%d prompt_len=%d max_tokens=%d timeout=%.1f text=%r",
         _OLLAMA_BASE_URL,
         _OLLAMA_MODEL,
+        long_form,
         len(text),
-        len(_LLM_PROMPT),
+        len(prompt),
         max_tokens,
         _OLLAMA_TIMEOUT,
         truncate_for_log(text, 300),
@@ -198,6 +224,7 @@ def _correct_with_ollama(text):
         client,
         model=_OLLAMA_MODEL,
         text=text,
+        prompt=prompt,
         max_tokens=max_tokens,
         # Ollama の OpenAI 互換APIは未知のフィールドを無視するため、
         # OpenRouter 固有のオプションは送らない
@@ -206,7 +233,7 @@ def _correct_with_ollama(text):
     )
 
 
-def _request_correction(client, model, text, max_tokens, extra_body, backend):
+def _request_correction(client, model, text, prompt, max_tokens, extra_body, backend):
     try:
         kwargs = {}
         if extra_body:
@@ -214,7 +241,7 @@ def _request_correction(client, model, text, max_tokens, extra_body, backend):
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": _LLM_PROMPT},
+                {"role": "system", "content": prompt},
                 {"role": "user", "content": text},
             ],
             max_tokens=max_tokens,
