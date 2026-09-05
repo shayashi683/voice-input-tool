@@ -20,3 +20,6 @@ app-backups/
 *.key
 config.json
 logs/
+
+# Machine-local config (contains absolute home paths)
+launch-agents/
