@@ -706,13 +706,28 @@ class VoiceInputApp(rumps.App):
                 return
 
             log.info(f"ASR ({elapsed:.2f}s): {text}")
-            text = self._text_for_insert(text)
-            if not text:
+            if not text.strip():
                 return
 
-            # 入力欄へは打ち込まず、パネルに積む。実際の入力は確定（Enter）時にまとめて行う
-            if self._record_session_text(text, generation):
-                call_on_main(self._panel_append, text, generation)
+            # まず生の認識結果を記録してパネルへ即座に表示する（リアルタイム表示）。
+            # LLM補正は別スレッドで行い、終わったらパネルへ上書きする。
+            # 位置をずらして上書きする方式は複数の補正・追記が並走すると
+            # 範囲がずれて壊れるため、パネルは _session_parts から全体を同期する
+            index = self._record_raw_segment(text, generation)
+            if index is None:
+                return
+            call_on_main(self._panel_sync, generation)
+
+            if not self.use_llm:
+                self._restore_recording_status()
+                return
+
+            self._set_status("correcting")
+            threading.Thread(
+                target=self._correct_segment,
+                args=(index, text, generation),
+                daemon=True,
+            ).start()
         except Exception:
             log.exception("発話セグメント処理で予期しないエラーが発生しました")
             notify_user(
@@ -720,25 +735,50 @@ class VoiceInputApp(rumps.App):
                 "音声入力処理でエラーが発生しました",
                 "詳細はログを確認してください",
             )
+            self._restore_recording_status()
+
+    def _record_raw_segment(self, text, generation):
+        """生の認識結果を _session_parts へ追記し、その index を返す。
+
+        次の録音が始まっていたら None。
+        """
+        with self._session_lock:
+            if not self._session_active or self._session_generation != generation:
+                return None
+            self._session_parts.append(text)
+            return len(self._session_parts) - 1
+
+    def _correct_segment(self, index, raw_text, generation):
+        """発話ごとの LLM 補正をバックグラウンドで実行し、結果を生テキストへ上書きする"""
+        try:
+            corrected = self._correct_text(raw_text)
+        except Exception as e:
+            log.exception("LLM補正に失敗しました: %s", e)
+            corrected = None
         finally:
             self._restore_recording_status()
+        if corrected is None or corrected == raw_text:
+            return
+        self._apply_correction(index, corrected, generation)
+
+    def _correct_text(self, text):
+        corrected = llm_correct(text)
+        log.info(f"LLM補正: {corrected}")
+        return corrected
+
+    def _apply_correction(self, index, corrected, generation):
+        """補正結果を _session_parts へ反映し、パネルを再同期する"""
+        with self._session_lock:
+            if not self._session_active or self._session_generation != generation:
+                return
+            if index >= len(self._session_parts):
+                return
+            self._session_parts[index] = corrected
+        call_on_main(self._panel_sync, generation)
 
     def _session_is_current(self, generation):
         with self._session_lock:
             return self._session_active and self._session_generation == generation
-
-    def _record_session_text(self, text, generation):
-        """この回の録音で認識した内容を覚えておく。区間同士は単純連結する。
-
-        次の録音が始まっていたら（世代が違えば）捨てて False を返す。
-        """
-        if not text:
-            return False
-        with self._session_lock:
-            if not self._session_active or self._session_generation != generation:
-                return False
-            self._session_parts.append(text)
-            return True
 
     def _finalize_session(self):
         """録音停止後、全区間の認識が終わった時点で全文を整形し、確認待ちへ進める"""
@@ -826,16 +866,26 @@ class VoiceInputApp(rumps.App):
         except Exception:
             log.exception("プレビューパネルの状態更新に失敗しました")
 
-    def _panel_append(self, text, generation):
+    def _panel_sync(self, generation):
+        """_session_parts の全文をパネルへ反映する（main thread）
+
+        区間ごとの追記・LLM補正・全文整形のどれも、この1経路に集約することで
+        パネルの内容を必ず _session_parts と一致させる。
+        """
         if self._panel is None or not self._session_is_current(generation):
             return
         if not self._panel.is_visible():
-            # まだ入力位置の探索中。表示時に _session_parts からまとめて反映する
+            # 表示前は _panel_show が _session_parts からまとめて反映する
             return
         try:
-            self._panel.append_text(text)
+            with self._session_lock:
+                expected = "".join(self._session_parts)
+            if self._panel.is_input_active() and self._panel.current_text() != expected:
+                # 確認待ち中にユーザーが編集していた場合は上書きしない
+                return
+            self._panel.set_text(expected)
         except Exception:
-            log.exception("プレビューパネルへの追記に失敗しました")
+            log.exception("プレビューパネルへの反映に失敗しました")
 
     def _panel_begin_confirm(self, generation):
         """録音停止直後: パネルを編集可・キーにし、Enter/Esc を受け付ける"""
@@ -859,6 +909,11 @@ class VoiceInputApp(rumps.App):
         if current != original:
             log.info("全文整形: パネルの本文が編集されているため結果を捨てました")
             return
+        # 以後の追記・補正の同期で整形前の本文へ戻らないよう、_session_parts も整形結果に揃える
+        with self._session_lock:
+            if not self._session_active or self._session_generation != generation:
+                return
+            self._session_parts = [polished]
         try:
             self._panel.set_text(polished)
         except Exception:
@@ -978,25 +1033,6 @@ class VoiceInputApp(rumps.App):
             log.exception("ネイティブ貼り付けへの送信に失敗しました")
             copy_to_clipboard(text)
             notify_user("Voice Input", "貼り付けに失敗したためコピーしました", text[:100])
-
-    def _text_for_insert(self, text):
-        if not self.use_llm:
-            return text
-
-        self._set_status("correcting")
-        try:
-            corrected = llm_correct(text)
-        except Exception as e:
-            log.exception("LLM補正に失敗しました: %s", e)
-            notify_user(
-                "Voice Input",
-                "LLM補正に失敗しました",
-                str(e)[:100],
-            )
-            return ""
-
-        log.info(f"LLM補正: {corrected}")
-        return corrected
 
     # ------------------------------------------------------------
     # --demo: テスト音源で入力フローを再現する

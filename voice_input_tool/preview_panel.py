@@ -416,19 +416,13 @@ class PreviewPanelController(NSObject):
         self._after_text_changed()
 
     @objc.python_method
-    def append_text(self, text):
-        """単純連結。区間間のスペース等は呼び出し側が決める"""
-        if not text:
-            return
-        length = self.text_view.textStorage().length()
-        # setEditable_(False) 中でもプログラムからの置換は通る。
-        # textStorage を直接触らず NSTextView 経由にして、フォント等の typing attributes を引き継ぐ
-        self.text_view.replaceCharactersInRange_withString_((length, 0), str(text))
-        self._after_text_changed()
-
-    @objc.python_method
     def current_text(self):
         return str(self.text_view.string())
+
+    @objc.python_method
+    def is_input_active(self):
+        """確認待ちで編集可・キーになっているか（= ユーザーが編集できる状態）"""
+        return bool(self.input_active)
 
     @objc.python_method
     def activate_for_input(self):
