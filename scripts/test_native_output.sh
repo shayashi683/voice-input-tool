@@ -10,6 +10,7 @@ clang -fobjc-arc -mmacosx-version-min=13.0 -I"$ROOT_DIR/native" \
   "$ROOT_DIR/native/VITNativeSupport.m" \
   "$ROOT_DIR/native/VITSetupGuideController.m" \
   "$ROOT_DIR/native/VITTextPasteController.m" \
+  "$ROOT_DIR/native/VITUpdateController.m" \
   -o "$TEST_DIR/native-output-test" \
   -framework Cocoa -framework ApplicationServices -framework Carbon
 VOICE_INPUT_TOOL_DIR="$TEST_DIR" "$TEST_DIR/native-output-test"
@@ -20,6 +21,10 @@ clang -fobjc-arc -mmacosx-version-min=13.0 -I"$ROOT_DIR/native" \
   "$ROOT_DIR/native/VITNativeSupport.m" \
   "$ROOT_DIR/native/VITSetupGuideController.m" \
   "$ROOT_DIR/native/VITTextPasteController.m" \
+  "$ROOT_DIR/native/VITUpdateController.m" \
   -o "$TEST_DIR/native-setup-test" \
   -framework Cocoa -framework ApplicationServices -framework Carbon
 VOICE_INPUT_TOOL_DIR="$TEST_DIR/setup" "$TEST_DIR/native-setup-test" "$@"
+clang -fobjc-arc -mmacosx-version-min=13.0 -I"$ROOT_DIR/native" \
+  "$ROOT_DIR/tests/native_update_test.m" -o "$TEST_DIR/native-update-test" -framework Cocoa
+"$TEST_DIR/native-update-test" ${VOICE_INPUT_UPDATE_SNAPSHOT:+"$VOICE_INPUT_UPDATE_SNAPSHOT"}

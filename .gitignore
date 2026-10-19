@@ -31,3 +31,4 @@ build/
 work/
 .wrangler/
 landing/downloads/
+landing/update.json

@@ -11,6 +11,13 @@
 - (void)fitToVisibleFrame:(NSRect)visibleFrame;
 @end
 
+@interface FakeUpdateEngine : NSTask
+@property(nonatomic, assign) BOOL pretendRunning;
+@end
+@implementation FakeUpdateEngine
+- (BOOL)isRunning { return self.pretendRunning; }
+@end
+
 @interface StartupTestDelegate : AppDelegate
 @property(nonatomic, assign) NSInteger permissionPrompts;
 @property(nonatomic, assign) NSInteger guidesPresented;
@@ -23,6 +30,16 @@
 - (void)prepareOutputPolling {}
 - (void)startEngine { self.enginesStarted += 1; }
 - (void)openSetupGuide:(id)sender { (void)sender; self.guidesPresented += 1; }
+@end
+
+@interface UpdateHandoffDelegate : StartupTestDelegate
+@property(nonatomic, assign) NSInteger installerOpens;
+@property(nonatomic, assign) NSInteger updateTerminations;
+@property(nonatomic, assign) BOOL installerSucceeds;
+@end
+@implementation UpdateHandoffDelegate
+- (BOOL)openUpdateInstaller:(NSURL *)url { self.installerOpens++; return self.installerSucceeds; }
+- (void)terminateAfterUpdateHandoff { self.updateTerminations++; }
 @end
 
 static void AssertContainedViews(NSView *parent) {
@@ -89,6 +106,51 @@ int main(int argc, const char *argv[]) {
         [laterLaunch applicationDidFinishLaunching:launch];
         NSCAssert(laterLaunch.guidesPresented == 0 && laterLaunch.permissionPrompts == 1,
                   @"Completed setup keeps the normal startup permission flow");
+        laterLaunch.currentStatus = @"listening";
+        NSCAssert(![laterLaunch canInstallUpdate], @"Recording blocks updates");
+        laterLaunch.currentStatus = @"processing";
+        NSCAssert(![laterLaunch canInstallUpdate], @"Transcription blocks updates");
+        laterLaunch.currentStatus = @"idle";
+        NSCAssert([laterLaunch canInstallUpdate], @"Idle allows updates");
+        laterLaunch.lastCommandAt = NSDate.date.timeIntervalSince1970;
+        NSCAssert(![laterLaunch canInstallUpdate], @"Pending command protects recording startup race");
+        laterLaunch.lastCommandAt = 0;
+        laterLaunch.pendingRequests = [NSMutableSet setWithObject:@"pending-paste"];
+        NSCAssert(![laterLaunch canInstallUpdate], @"Pending paste blocks updates");
+        [laterLaunch.pendingRequests removeAllObjects];
+        laterLaunch.pendingOutput = [[@"partial" dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+        NSCAssert(![laterLaunch canInstallUpdate], @"Partial paste output blocks updates");
+        [laterLaunch.pendingOutput setLength:0];
+        laterLaunch.pendingUpdatePackage = [NSURL fileURLWithPath:@"/unused-test.pkg"];
+        NSInteger startsBefore = laterLaunch.enginesStarted;
+        [laterLaunch toggleRecording:nil];
+        [laterLaunch toggleLLM:nil];
+        NSCAssert(laterLaunch.enginesStarted == startsBefore, @"No commands during update handoff");
+        laterLaunch.pendingUpdatePackage = nil;
+        UpdateHandoffDelegate *handoff = [UpdateHandoffDelegate new];
+        handoff.currentStatus = @"idle";
+        handoff.installerSucceeds = YES;
+        FakeUpdateEngine *fakeEngine = [FakeUpdateEngine new];
+        fakeEngine.pretendRunning = YES;
+        handoff.engineTask = fakeEngine;
+        NSCAssert([handoff installUpdateAtURL:[NSURL fileURLWithPath:@"/unused-test.pkg"]], @"Start graceful handoff");
+        NSCAssert(handoff.installerOpens == 0 && handoff.updateTerminations == 0, @"Must wait for engine shutdown");
+        fakeEngine.pretendRunning = NO;
+        [handoff finishUpdateWhenEngineStops];
+        NSCAssert(handoff.installerOpens == 1 && handoff.updateTerminations == 1, @"Open Installer only after shutdown");
+        handoff.pendingUpdatePackage = nil;
+        handoff.lastCommandAt = 0;
+        handoff.installerSucceeds = NO;
+        [handoff installUpdateAtURL:[NSURL fileURLWithPath:@"/unused-test.pkg"]];
+        NSCAssert(handoff.enginesStarted == 1 && handoff.updateTerminations == 1 && !handoff.pendingUpdatePackage,
+                  @"Installer failure restarts engine instead of terminating app");
+        handoff.lastCommandAt = 0;
+        fakeEngine.pretendRunning = YES;
+        [handoff installUpdateAtURL:[NSURL fileURLWithPath:@"/unused-test.pkg"]];
+        handoff.updateStartedAt = [NSDate dateWithTimeIntervalSinceNow:-11];
+        [handoff finishUpdateWhenEngineStops];
+        NSCAssert(!handoff.pendingUpdatePackage && handoff.installerOpens == 2 && fakeEngine.pretendRunning,
+                  @"Shutdown timeout must not launch Installer or force-kill engine");
         VITSetupGuideController *reopened = [[VITSetupGuideController alloc] initWithWorkDirectory:directory
             settingsHandler:nil accessibilityHandler:nil];
         [reopened dismissGuide:nil];

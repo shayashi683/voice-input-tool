@@ -35,4 +35,5 @@ pkgbuild --root "$STAGE/root" --component-plist "$STAGE/components.plist" --scri
   --install-location / "$STAGE/VoiceInputTool.pkg"
 cp "$STAGE/VoiceInputTool.pkg" "$OUT/VoiceInputTool-$VERSION-mac-arm64.pkg"
 (cd "$OUT" && shasum -a 256 "VoiceInputTool-$VERSION-mac-arm64.pkg" > "VoiceInputTool-$VERSION-mac-arm64.pkg.sha256")
+python3 "$ROOT_DIR/scripts/write_update_manifest.py"
 echo "Built $OUT/VoiceInputTool-$VERSION-mac-arm64.pkg"

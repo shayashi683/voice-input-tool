@@ -14,6 +14,7 @@ NATIVE_SOURCES=(
     "$ROOT_DIR/native/VITNativeSupport.m"
     "$ROOT_DIR/native/VITSetupGuideController.m"
     "$ROOT_DIR/native/VITTextPasteController.m"
+    "$ROOT_DIR/native/VITUpdateController.m"
 )
 
 case "$APP_BUNDLE_PATH" in

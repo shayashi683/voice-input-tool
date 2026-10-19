@@ -120,6 +120,16 @@ open ~/Applications/VoiceInputTool.app
 
 API Keyを後で入れる場合は、アプリ起動後にメニューバーの 🎙 →「設定...」から入力できます。
 
+## インストール済みアプリの更新
+
+v1.0.14から、メニューバーの「更新を確認…」で最新版を確認できます。「更新を確認」→「更新をダウンロード」→「アプリを終了してインストール」の順に進み、macOSのインストーラーで承認してください。APIキー、マイク、ショートカット、録音履歴、初回設定の完了状態は保持します。
+
+v1.0.13以前には更新機能がないため、初回だけダウンロードページのPKGで更新してください。それ以降はアプリ内の更新画面を利用できます。インストーラーを中止した場合は、アプリを開き直してください。
+
+更新確認は明示的にボタンを押したときだけ行います。音声・APIキー・個人設定は送信せず、HTTPSの `update.json` を取得します。配布先URL、バージョン、対応OS、ファイルサイズ、SHA-256を検証し、同版・旧版への更新は行いません。録音・処理・設定中はインストールを開始せず、エンジンが正常終了してからInstallerを開きます。通信失敗、検証失敗、キャンセルでは現在のインストールを変更しません。
+
+配布は未署名の開発版です。SHA-256は同一HTTPS配布元の情報との整合性検証であり、開発者署名の代わりではありません。OSの確認・管理者認証が必要な場合はユーザーが操作します。完全無人の自動更新ではありません。
+
 ## 配布用ソースについて
 
 `landing/` は公開中のダウンロードページのソースです。配布PKGにはアプリ本体とソースだけを含め、APIキー、個人設定、録音、ログは含めません。更新前にアプリを終了してください。既存の設定と録音は保持します。
@@ -130,13 +140,16 @@ macOSで配布版を作成し、Cloudflare Pagesへ公開する手順:
 python3 scripts/fetch_release_runtime.py
 mkdir -p landing/downloads
 curl -fL https://voice-input-tool.pages.dev/downloads/VoiceInputTool-1.0.12-mac-arm64.pkg -o landing/downloads/VoiceInputTool-1.0.12-mac-arm64.pkg
+curl -fL https://voice-input-tool.pages.dev/downloads/VoiceInputTool-1.0.13-mac-arm64.pkg -o landing/downloads/VoiceInputTool-1.0.13-mac-arm64.pkg
 ./scripts/package_mac_pkg.sh
 python3 scripts/verify_release.py
 npx wrangler@4.151.1 login
 ./scripts/deploy_cloudflare_pages.sh
 ```
 
-公開先は `voice-input-tool.pages.dev`、プロジェクト名は `voice-input-tool`、本番ブランチは `main` です。既存のv1.0.12 PKGとランタイムv1.0.2も残し、古いインストーラーのリンクを保持します。ランタイムの全分割ファイルとSHA-256、PKG内のソース一致、ページのリンクを検証してから公開します。生成物はGitの対象外です。
+公開先は `voice-input-tool.pages.dev`、プロジェクト名は `voice-input-tool`、本番ブランチは `main` です。既存のv1.0.12 / v1.0.13 PKGとランタイムv1.0.2も残し、古いインストーラーのリンクを保持します。ランタイムの全分割ファイルとSHA-256、PKG内のソース一致、ページのリンクを検証してから公開します。生成物はGitの対象外です。
+
+リリース時は2つのInfo.plistのバージョン、`packaging/release-notes.txt`、ページのバージョンを更新します。`package_mac_pkg.sh` がPKGの実際のSHA-256とサイズから `landing/update.json` を生成し、`verify_release.py` が配布物との一致を確認します。更新フィードとPKGは同じPagesデプロイで公開します。過去版のPKGやランタイムは再公開時も削除せず保持してください。
 
 `scripts/build_runtime_payload.sh` と `scripts/package_runtime_chunks.sh` は、ランタイム自体を変更するときに使用します。アプリだけの更新では、既存の検証済みランタイムを再利用します。
 

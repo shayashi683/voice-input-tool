@@ -5,6 +5,7 @@
 #import "VITNativeSupport.h"
 #import "VITSetupGuideController.h"
 #import "VITTextPasteController.h"
+#import "VITUpdateController.h"
 
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 @property(nonatomic, strong) NSStatusItem *statusItem;
@@ -26,6 +27,10 @@
 @property(nonatomic, strong) VITGlobalHotKey *globalHotKey;
 @property(nonatomic, strong) VITTextPasteController *pasteController;
 @property(nonatomic, strong) VITSetupGuideController *setupGuide;
+@property(nonatomic, strong) VITUpdateController *updateController;
+@property(nonatomic, strong) NSURL *pendingUpdatePackage;
+@property(nonatomic, strong) NSDate *updateStartedAt;
+@property(nonatomic, assign) NSTimeInterval lastCommandAt;
 - (void)toggleRecording:(id)sender;
 - (void)toggleRecordingForTargetPid:(pid_t)targetPid;
 - (BOOL)showStatusIconIfAvailable;
@@ -95,6 +100,11 @@
         versionItem.enabled = NO;
         [menu addItem:versionItem];
     }
+
+    NSMenuItem *updateItem = [[NSMenuItem alloc] initWithTitle:@"更新を確認…"
+        action:@selector(openUpdater:) keyEquivalent:@""];
+    updateItem.target = self;
+    [menu addItem:updateItem];
 
     NSMenuItem *permissionItem = [[NSMenuItem alloc] initWithTitle:@"アクセシビリティ許可を確認"
                                                             action:@selector(checkAccessibility:)
@@ -455,6 +465,7 @@
     NSData *data = [[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
     [handle writeData:data];
     [handle closeFile];
+    self.lastCommandAt = NSDate.date.timeIntervalSince1970;
     return YES;
 }
 
@@ -463,6 +474,7 @@
 }
 
 - (void)toggleRecordingForTargetPid:(pid_t)targetPid {
+    if (self.pendingUpdatePackage) return;
     VITNativeLog([NSString stringWithFormat:@"toggleRecording target_pid=%d", targetPid]);
     BOOL wasRunning = self.engineTask && self.engineTask.isRunning;
     [self startEngine];
@@ -481,6 +493,7 @@
 }
 
 - (void)toggleLLM:(id)sender {
+    if (self.pendingUpdatePackage) return;
     VITNativeLog(@"toggleLLM");
     BOOL wasRunning = self.engineTask && self.engineTask.isRunning;
     [self startEngine];
@@ -501,6 +514,7 @@
 }
 
 - (void)openSettings:(id)sender {
+    if (self.pendingUpdatePackage) return;
     VITNativeLog(@"openSettings");
     if (self.settingsTask.isRunning) {
         NSRunningApplication *settingsApp = [NSRunningApplication runningApplicationWithProcessIdentifier:self.settingsTask.processIdentifier];
@@ -564,6 +578,7 @@
 }
 
 - (void)openSetupGuide:(id)sender {
+    if (self.pendingUpdatePackage) return;
     (void)sender;
     if (!self.setupGuide) {
         __weak AppDelegate *weakSelf = self;
@@ -572,6 +587,67 @@
             accessibilityHandler:^{ [weakSelf checkAccessibility:nil]; }];
     }
     [self.setupGuide showGuide];
+}
+
+- (BOOL)canInstallUpdate {
+    // Consume output already written before accepting an idle status; do not
+    // quit between the engine writing its result and the native paste callback.
+    [self pollOutputFile:nil];
+    return !self.pendingUpdatePackage && !self.settingsTask.isRunning && !self.restartEngineWhenIdle &&
+        [self.currentStatus isEqualToString:@"idle"] && self.pendingRequests.count == 0 && self.pendingOutput.length == 0 &&
+        NSDate.date.timeIntervalSince1970 - self.lastCommandAt > 1.0;
+}
+
+- (void)openUpdater:(id)sender {
+    if (!self.updateController) {
+        __weak AppDelegate *weakSelf = self;
+        NSString *version = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+        self.updateController = [[VITUpdateController alloc] initWithCurrentVersion:version
+            canInstallHandler:^{ return [weakSelf canInstallUpdate]; }
+            installHandler:^BOOL(NSURL *url) { return [weakSelf installUpdateAtURL:url]; }];
+    }
+    [self.updateController showUpdater];
+}
+
+- (BOOL)installUpdateAtURL:(NSURL *)url {
+    if (![self canInstallUpdate]) return NO;
+    self.pendingUpdatePackage = url;
+    self.updateStartedAt = NSDate.date;
+    [self.globalHotKey invalidate];
+    // Let the engine close its microphone and flush state; never force-kill for updates.
+    [self sendCommand:@"quit"];
+    [self finishUpdateWhenEngineStops];
+    return YES;
+}
+
+- (BOOL)openUpdateInstaller:(NSURL *)url {
+    return [NSWorkspace.sharedWorkspace openURL:url];
+}
+
+- (void)terminateAfterUpdateHandoff { [NSApp terminate:nil]; }
+
+- (void)finishUpdateWhenEngineStops {
+    if (!self.pendingUpdatePackage) return;
+    if (self.engineTask.isRunning) {
+        if ([NSDate.date timeIntervalSinceDate:self.updateStartedAt] < 10) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [self finishUpdateWhenEngineStops];
+            });
+            return;
+        }
+        self.pendingUpdatePackage = nil;
+        [self registerConfiguredHotKey];
+        [self.updateController installationFailed:@"音声エンジンの終了を確認できませんでした。更新は行っていません。アプリを開き直して再試行してください。"];
+        return;
+    }
+    if (![self openUpdateInstaller:self.pendingUpdatePackage]) {
+        self.pendingUpdatePackage = nil;
+        [self startEngine];
+        [self registerConfiguredHotKey];
+        [self.updateController installationFailed:@"macOSのインストーラーを開けませんでした。更新は行っていません。"];
+        return;
+    }
+    [self terminateAfterUpdateHandoff];
 }
 
 - (void)quit:(id)sender {

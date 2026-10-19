@@ -1,11 +1,13 @@
 """Fail closed before uploading a release with missing or mismatched assets."""
 import hashlib
+import json
 from html.parser import HTMLParser
 from pathlib import Path
 import plistlib
 import re
 import subprocess
 import tempfile
+from write_update_manifest import make_manifest
 
 ROOT = Path(__file__).resolve().parents[1]
 SITE = ROOT / 'landing'
@@ -21,6 +23,7 @@ def verify():
     assert package.read_bytes()[:4] == b'xar!'
     checksum, filename = package.with_suffix('.pkg.sha256').read_text().split()
     assert filename == name and sha256(package) == checksum
+    assert json.loads((SITE / 'update.json').read_text()) == make_manifest(ROOT), 'Updater feed does not match package'
     html = (SITE / 'index.html').read_text()
     assert f'downloads/{name}' in html and f'v{version}' in html
 
@@ -52,6 +55,7 @@ def verify():
     kind, checksum, _, size = rows[0].split()
     assert kind == 'archive' and archive.hexdigest() == checksum and total == int(size)
     assert (SITE / 'downloads/VoiceInputTool-1.0.12-mac-arm64.pkg').read_bytes()[:4] == b'xar!'
+    assert (SITE / 'downloads/VoiceInputTool-1.0.13-mac-arm64.pkg').read_bytes()[:4] == b'xar!'
 
     with tempfile.TemporaryDirectory(prefix='voice-input-release-verify-') as scratch:
         unpacked = Path(scratch) / 'package'
