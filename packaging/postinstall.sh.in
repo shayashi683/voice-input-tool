@@ -36,7 +36,7 @@ user_script="/tmp/voice-input-tool-user-install-$console_user.sh"
 
 /bin/mkdir -p "$install_dir"
 
-for item in README.md requirements.txt start.sh voice_input.py native packaging scripts voice_input_tool tests; do
+for item in README.md requirements.txt start.sh voice_input.py native packaging scripts voice_input_tool tests assets; do
     /bin/rm -rf "$install_dir/$item"
     /bin/cp -R "$SOURCE_PAYLOAD/$item" "$install_dir/$item"
 done

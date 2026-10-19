@@ -28,4 +28,6 @@ recordings/
 setup-guide.json
 dist/
 build/
+work/
+.wrangler/
 landing/downloads/

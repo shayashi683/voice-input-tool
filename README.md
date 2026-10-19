@@ -122,9 +122,23 @@ API Keyを後で入れる場合は、アプリ起動後にメニューバーの 
 
 ## 配布用ソースについて
 
-このリポジトリには、インストール済みアプリから反映したアプリ本体、テスト、ローカルビルド用スクリプトを含みます。配布サイトの `landing/`、PKG作成用スクリプト、Cloudflare Pagesへのデプロイスクリプトは含まれていません。アプリをローカルで作成する場合は、上記の `scripts/install_mac_app.sh` を使ってください。
+`landing/` は公開中のダウンロードページのソースです。配布PKGにはアプリ本体とソースだけを含め、APIキー、個人設定、録音、ログは含めません。更新前にアプリを終了してください。既存の設定と録音は保持します。
 
-`scripts/build_runtime_payload.sh` と `scripts/package_runtime_chunks.sh` は、配布用ランタイムの作成・分割用です。これらだけではPKGや配布サイトの作成・公開はできません。
+macOSで配布版を作成し、Cloudflare Pagesへ公開する手順:
+
+```bash
+python3 scripts/fetch_release_runtime.py
+mkdir -p landing/downloads
+curl -fL https://voice-input-tool.pages.dev/downloads/VoiceInputTool-1.0.12-mac-arm64.pkg -o landing/downloads/VoiceInputTool-1.0.12-mac-arm64.pkg
+./scripts/package_mac_pkg.sh
+python3 scripts/verify_release.py
+npx wrangler@4.151.1 login
+./scripts/deploy_cloudflare_pages.sh
+```
+
+公開先は `voice-input-tool.pages.dev`、プロジェクト名は `voice-input-tool`、本番ブランチは `main` です。既存のv1.0.12 PKGとランタイムv1.0.2も残し、古いインストーラーのリンクを保持します。ランタイムの全分割ファイルとSHA-256、PKG内のソース一致、ページのリンクを検証してから公開します。生成物はGitの対象外です。
+
+`scripts/build_runtime_payload.sh` と `scripts/package_runtime_chunks.sh` は、ランタイム自体を変更するときに使用します。アプリだけの更新では、既存の検証済みランタイムを再利用します。
 
 ## 社員向けセットアップ（手動）
 
@@ -465,8 +479,9 @@ voice_input_tool/text_delivery.py  - カーソル位置への入力
 voice_input_tool/native_bridge.py  - ネイティブアプリとのJSONL連携
 native/                   - macOS常駐UI・ホットキー・貼り付け
 packaging/                - Info.plistとインストールテンプレート
-scripts/                  - ローカルビルド・テスト・ランタイム作成
+scripts/                  - ビルド・テスト・配布検証・公開
 tests/                    - 標準unittestによる回帰テスト
+landing/                  - ダウンロードページ（生成した配布物はGit対象外）
 ```
 
 開発時の回帰テスト:

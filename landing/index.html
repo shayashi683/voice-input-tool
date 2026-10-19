@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Voice Input Tool | Mac向け日本語音声入力</title>
+    <meta
+      name="description"
+      content="Voice Input Toolは、日本語音声を文字起こしして、Macのカーソル位置へそのまま入力するメニューバー常駐アプリです。"
+    >
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="styles.css?v=2">
+  </head>
+  <body>
+    <header class="site-header" aria-label="サイトヘッダー">
+      <a class="brand" href="#top" aria-label="Voice Input Tool">
+        <span class="brand-mark" aria-hidden="true">
+          <img src="assets/favicon.svg" alt="" width="32" height="32">
+        </span>
+        <span>Voice Input Tool</span>
+      </a>
+      <nav class="site-nav" aria-label="ページ内ナビゲーション">
+        <a href="#features">特徴</a>
+        <a href="#setup">使い方</a>
+        <a href="#download">ダウンロード</a>
+        <a href="#faq">FAQ</a>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-background" aria-hidden="true"></div>
+        <div class="hero-scrim" aria-hidden="true"></div>
+        <div class="hero-content">
+          <p class="eyebrow">Mac menu bar voice input</p>
+          <h1 id="hero-title">Voice Input Tool</h1>
+          <p class="hero-copy">
+            話すだけで、いま開いているMacアプリのカーソル位置へ入力。
+            GPT-Transcribeかローカルモデルを選んで、日本語音声を文字起こしできます。
+          </p>
+          <div class="hero-actions" aria-label="主要アクション">
+            <a class="button button-primary" href="#download">Mac版をダウンロード</a>
+            <a class="button button-secondary" href="#setup">導入手順を見る</a>
+          </div>
+          <dl class="hero-facts" aria-label="主な仕様">
+            <div>
+              <dt>入力先</dt>
+              <dd>Slack, Notion, ブラウザ, エディタ</dd>
+            </div>
+            <div>
+              <dt>音声認識</dt>
+              <dd>GPT-Transcribe / ローカル</dd>
+            </div>
+            <div>
+              <dt>補正</dt>
+              <dd>句読点の補正を任意で追加</dd>
+            </div>
+          </dl>
+        </div>
+      </section>
+
+      <section class="section section-compact">
+        <div class="section-inner proof-row" aria-label="利用シーン">
+          <span>メニューバー常駐</span>
+          <span>グローバルホットキー</span>
+          <span>録音停止後に一括入力</span>
+          <span>APIキーはローカル保存</span>
+        </div>
+      </section>
+
+      <section id="features" class="section">
+        <div class="section-inner">
+          <div class="section-heading">
+            <p class="eyebrow">Features</p>
+            <h2>手で打つ前に、まず話せる</h2>
+            <p>
+              アイデア、返信文、要件メモ、タスク整理。長い文章をMac上のどこへでも素早く入れられるようにします。
+            </p>
+          </div>
+          <div class="feature-grid">
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <img src="assets/icon-mic.svg" alt="" width="24" height="24">
+              </span>
+              <h3>カーソル位置へ直接入力</h3>
+              <p>録音開始時に前面だったアプリへ、文字起こし結果をそのまま入力します。</p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <img src="assets/icon-cpu.svg" alt="" width="24" height="24">
+              </span>
+              <h3>音声認識モデルを選べる</h3>
+              <p>精度重視ならGPT-Transcribeがおすすめ。音声をOpenAIへ送信します。Mac内で処理するReazonSpeechも選べます。</p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <img src="assets/icon-sparkles.svg" alt="" width="24" height="24">
+              </span>
+              <h3>句読点だけを補正</h3>
+              <p>GPT-Transcribeでは通常、追加のLLM補正はOFFで使えます。必要な場合は同じOpenAI APIキーで句読点を整えられます。</p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">
+                <img src="assets/icon-key.svg" alt="" width="24" height="24">
+              </span>
+              <h3>APIキーは自分で管理</h3>
+              <p>クラウド機能にはご自身のAPIキーが必要です。キーは手元の環境に保存し、設定から変更できます。</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="setup" class="section section-muted">
+        <div class="section-inner two-column">
+          <div class="section-heading align-left">
+            <p class="eyebrow">How it works</p>
+            <h2>はじめての設定も、画面に沿って</h2>
+            <p>
+              インストール後にアプリが開き、初回の設定ガイドを表示します。APIキーの設定から試し録音まで、順番に進められます。
+            </p>
+          </div>
+          <ol class="steps">
+            <li>
+              <span class="step-number">1</span>
+              <div>
+                <h3>設定ガイドを開く</h3>
+                <p>インストール後の初回起動で自動表示されます。メニューバーの「はじめての設定...」からも開けます。</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">2</span>
+              <div>
+                <h3>認識モデルと権限を設定</h3>
+                <p>GPT-Transcribeを使う場合は設定で選び、ご自身のOpenAI APIキーを入力。マイクとアクセシビリティを許可します。</p>
+              </div>
+            </li>
+            <li>
+              <span class="step-number">3</span>
+              <div>
+                <h3>試しに話してみる</h3>
+                <p>入力欄を選び、設定したホットキー（初期値はCtrl+Shift+Space）で録音を開始。もう一度押すと停止し、結果が入ります。</p>
+              </div>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section id="download" class="section download-section">
+        <div class="section-inner download-layout">
+          <div>
+            <p class="eyebrow">Download</p>
+            <h2>Mac版ダウンロード</h2>
+            <p>
+              PKGをダブルクリックすると、macOSのインストーラー画面が開きます。
+              初回だけ実行ランタイムを取得し、必要な環境構築とMacアプリ作成まで自動で進みます。
+              Terminal操作は不要です。
+            </p>
+          </div>
+          <div class="download-panel" aria-label="ダウンロード情報">
+            <div class="release-status">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span>ダウンロード可能</span>
+            </div>
+            <h3>Voice Input Tool for Mac</h3>
+            <p>macOS 13以降のApple Silicon Mac対応。初回の設定ガイドで、GPT-Transcribeの設定を案内します。</p>
+            <a class="button button-primary button-wide" href="downloads/VoiceInputTool-1.0.13-mac-arm64.pkg" download>Mac版PKG v1.0.13をダウンロード</a>
+            <p class="small-note">2026年10月19日更新：設定画面でキーを押してショートカットを設定できない問題を修正。Left / Right Shiftやキーの組み合わせに対応し、「キャンセル」の表示も修正しました。</p>
+            <p class="small-note">更新前にVoice Input Toolを終了してください。既存のAPIキー・マイク・ショートカット設定は引き継がれます。<a href="downloads/VoiceInputTool-1.0.13-mac-arm64.pkg.sha256">SHA-256を確認</a></p>
+            <p class="small-note">
+              未署名の開発版です。警告が出る場合はPKGを右クリックして開いてください。初回インストールにはネット接続が必要です。
+            </p>
+            <ol class="download-steps" aria-label="未署名アプリの開き方">
+              <li>PKGをダウンロード</li>
+              <li>PKGをダブルクリック</li>
+              <li>画面に沿ってインストール</li>
+            </ol>
+          </div>
+        </div>
+      </section>
+
+      <section id="faq" class="section section-muted">
+        <div class="section-inner">
+          <div class="section-heading">
+            <p class="eyebrow">FAQ</p>
+            <h2>導入前によくある質問</h2>
+          </div>
+          <div class="faq-list">
+            <details>
+              <summary>録音は始まるのに文字が入力されない場合は？</summary>
+              <p>まず設定の入力マイクと、マイク本体のミュートを確認してください。録音履歴に「認識結果が空」と出る場合は、音声が入っていない可能性があります。</p>
+            </details>
+            <details>
+              <summary>音声は外部に送られますか？</summary>
+              <p>GPT-Transcribeを選ぶと、録音音声をOpenAIへ送信して文字起こしします。ローカルのReazonSpeechでは音声を外部に送信しません。追加のLLM補正をONにした場合は、文字起こし後のテキストもOpenAIへ送信します。</p>
+            </details>
+            <details>
+              <summary>APIキーなしでも使えますか？</summary>
+              <p>ローカルのReazonSpeechを選び、LLM補正をOFFにすればキーなしで使えます。GPT-Transcribeと追加のLLM補正には、同じOpenAI APIキーを使います。API利用料はOpenAIで発生します。</p>
+            </details>
+            <details>
+              <summary>インストールするとGPT-Transcribeに切り替わりますか？</summary>
+              <p>新規インストールの初期設定はローカル認識です。GPT-Transcribeを使うには、設定で選んでOpenAI APIキーを入力してください。アップデート時は既存の音声認識設定を引き継ぎます。GPT-Transcribeでは、追加のLLM補正は通常OFFがおすすめです。</p>
+            </details>
+            <details>
+              <summary>どのアプリに入力できますか？</summary>
+              <p>通常のテキスト入力欄があるMacアプリで利用できます。貼り付けできない場合は結果をクリップボードに保持します。</p>
+            </details>
+            <details>
+              <summary>社外向け配布で必要なものは？</summary>
+              <p>無料配布の開発版は警告が出る場合があります。警告が出た場合はPKGを右クリックして「開く」を選んでください。完全に自然に開かせる場合は、Appleの署名とNotarizationが必要です。</p>
+            </details>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="section-inner footer-inner">
+        <span>Voice Input Tool</span>
+        <span>Mac向け日本語音声入力アプリ</span>
+      </div>
+    </footer>
+  </body>
+</html>
