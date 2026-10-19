@@ -20,3 +20,12 @@ app-backups/
 *.key
 config.json
 logs/
+
+# Local runtime, recordings, and build products
+.python/
+.runtime/
+recordings/
+setup-guide.json
+dist/
+build/
+landing/downloads/

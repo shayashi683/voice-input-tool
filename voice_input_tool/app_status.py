@@ -6,6 +6,7 @@ import threading
 
 from voice_input_tool.app_paths import TYPING_INDICATOR_ICON_FRAMES
 from voice_input_tool.native_bridge import write_status
+from voice_input_tool.statuses import HEARING, IDLE, LISTENING, labels_for
 
 log = logging.getLogger("voice_input")
 
@@ -40,7 +41,7 @@ class AppStatusController:
         self.use_llm = use_llm
         self.headless = headless
         self.call_after = call_after
-        self.status = "idle"
+        self.status = IDLE
         self.lock = threading.Lock()
         self.version = 0
         self.icon_frames = None
@@ -80,7 +81,7 @@ class AppStatusController:
             return self.status
 
     def restore_recording_status(self, is_recording):
-        self.set("listening" if is_recording else "idle")
+        self.set(LISTENING if is_recording else IDLE)
 
     def set_menu_bar_indicator(self, title, icon_frames=None):
         if self.headless:
@@ -108,7 +109,7 @@ class AppStatusController:
 
     def advance_icon(self, _sender=None):
         icon_frames = self.icon_frames
-        if not icon_frames or self.current() != "hearing":
+        if not icon_frames or self.current() != HEARING:
             self.stop_icon_animation()
             return
 
@@ -122,14 +123,6 @@ class AppStatusController:
         self.icon_frame_index = 0
 
     def labels(self, status):
-        hotkey_display = self.get_hotkey_display()
-        states = {
-            "idle": ("🎙", f"録音開始 ({hotkey_display})", None),
-            "starting": ("⏳", f"マイク起動中… ({hotkey_display})", None),
-            "listening": ("🟢", f"録音停止・入力待機中 ({hotkey_display})", None),
-            "hearing": ("", f"録音停止・音声入力中… ({hotkey_display})", TYPING_INDICATOR_ICON_FRAMES),
-            "processing": ("📝", "音声認識中…", None),
-            "correcting": ("🧠", "LLM補正中…", None),
-            "inserting": ("⌨️", "カーソル位置へ入力中…", None),
-        }
-        return states.get(status, states["idle"])
+        labels = labels_for(status, self.get_hotkey_display())
+        icon_frames = TYPING_INDICATOR_ICON_FRAMES if labels.animate_activity else None
+        return labels.title, labels.record_title, icon_frames

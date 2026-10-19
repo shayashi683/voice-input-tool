@@ -4,13 +4,17 @@ import json
 import logging
 import os
 import time
+import uuid
+import fcntl
 
 from voice_input_tool.app_paths import (
     COMMAND_FILE_PATH,
     NATIVE_PASTE_READY_PATH,
     OUTPUT_FILE_PATH,
     STATUS_FILE_PATH,
+    DELIVERY_RECEIPTS_DIR,
 )
+from voice_input_tool.statuses import labels_for
 
 log = logging.getLogger("voice_input")
 
@@ -31,19 +35,27 @@ def ensure_bridge_files():
         pass
 
 
+def _append_line(path, payload):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    encoded = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+    descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        remaining = memoryview(encoded)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("ブリッジファイルへの書き込みが中断されました")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def write_status(status, title, record_title, use_llm):
-    native_titles = {
-        "idle": "🎙",
-        "starting": "⏳",
-        "listening": "🟢",
-        "hearing": "•••",
-        "processing": "📝",
-        "correcting": "AI",
-        "inserting": "⌨",
-    }
     payload = {
         "status": status,
-        "title": title or native_titles.get(status, "VI"),
+        "title": title or labels_for(status).title,
         "record_title": record_title,
         "llm_title": "LLM補正: ON" if use_llm else "LLM補正: OFF",
         "updated_at": time.time(),
@@ -59,14 +71,30 @@ def write_status(status, title, record_title, use_llm):
 
 
 def write_output(text, pid):
+    request_id = str(uuid.uuid4())
     payload = {
+        "request_id": request_id,
         "text": text,
         "pid": pid,
         "created_at": time.time(),
+        "expires_at": time.time() + 10.0,
     }
-    os.makedirs(os.path.dirname(OUTPUT_FILE_PATH), exist_ok=True)
-    with open(OUTPUT_FILE_PATH, "a", encoding="utf-8") as f:
-        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    _append_line(OUTPUT_FILE_PATH, payload)
+    return request_id
+
+
+def wait_for_delivery(request_id, timeout=3.0):
+    path = DELIVERY_RECEIPTS_DIR / f"{uuid.UUID(request_id)}.json"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            payload = json.loads(path.read_text())
+            if payload.get("request_id") == request_id and payload.get("status") in {"paste_sent", "copied", "failed"}:
+                return payload["status"]
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.05)
+    return "delivery_unknown"
 
 
 def parse_command_line(line):
@@ -98,22 +126,34 @@ def parse_command_line(line):
 
 
 class NativeCommandReader:
-    def __init__(self, path=COMMAND_FILE_PATH):
+    def __init__(self, path=COMMAND_FILE_PATH, start_offset=None):
         self.path = path
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         with open(self.path, "a", encoding="utf-8"):
             pass
-        self.offset = os.path.getsize(self.path)
+        size = os.path.getsize(self.path)
+        self.offset = min(size, max(0, int(start_offset))) if start_offset is not None else size
+        self.pending = b""
 
     def read_new_commands(self):
         current_size = os.path.getsize(self.path)
         if current_size < self.offset:
             self.offset = 0
+            self.pending = b""
         if current_size == self.offset:
             return []
 
-        with open(self.path, "r", encoding="utf-8") as f:
+        with open(self.path, "rb") as f:
             f.seek(self.offset)
-            commands = f.read().splitlines()
+            chunk = f.read()
             self.offset = f.tell()
+        data = self.pending + chunk
+        lines = data.split(b"\n")
+        self.pending = lines.pop()
+        commands = []
+        for line in lines:
+            try:
+                commands.append(line.decode("utf-8"))
+            except UnicodeDecodeError:
+                log.exception("コマンド行をUTF-8として読み込めませんでした")
         return commands

@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Voice Input Tool">
+  <defs>
+    <linearGradient id="tile" x1="180" y1="112" x2="844" y2="912" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#13a778"/>
+      <stop offset="1" stop-color="#087350"/>
+    </linearGradient>
+    <linearGradient id="highlight" x1="256" y1="128" x2="800" y2="768" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".18"/>
+      <stop offset=".62" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="48" y="48" width="928" height="928" rx="208" fill="url(#tile)"/>
+  <rect x="48" y="48" width="928" height="928" rx="208" fill="url(#highlight)"/>
+  <path
+    d="M512 210c-70 0-126 56-126 126v188c0 70 56 126 126 126s126-56 126-126V336c0-70-56-126-126-126Z"
+    fill="#fff"
+  />
+  <path
+    d="M281 459c0 128 103 231 231 231s231-103 231-231"
+    fill="none"
+    stroke="#fff"
+    stroke-width="54"
+    stroke-linecap="round"
+  />
+  <path d="M512 690v98" fill="none" stroke="#fff" stroke-width="54" stroke-linecap="round"/>
+  <path d="M372 812h280" fill="none" stroke="#fff" stroke-width="54" stroke-linecap="round"/>
+  <path d="M453 344h118M453 438h118" fill="none" stroke="#087350" stroke-opacity=".42" stroke-width="24" stroke-linecap="round"/>
+</svg>

@@ -1,94 +1,71 @@
 #import <Cocoa/Cocoa.h>
 #import <ApplicationServices/ApplicationServices.h>
-#import <Carbon/Carbon.h>
-#include <unistd.h>
-
-static NSString * const WorkDir = @"/Users/shogohayashi/voice-input-tool";
-static NSString * const PythonPath = @"/Users/shogohayashi/voice-input-tool/.venv-framework/bin/python3";
-static NSString * const ScriptPath = @"/Users/shogohayashi/voice-input-tool/voice_input.py";
-static NSString * const CommandFilePath = @"/Users/shogohayashi/voice-input-tool/logs/voice-input-command.txt";
-static NSString * const OutputFilePath = @"/Users/shogohayashi/voice-input-tool/logs/voice-input-output.jsonl";
-static NSString * const StatusFilePath = @"/Users/shogohayashi/voice-input-tool/logs/voice-input-status.json";
-static NSString * const PasteReadyPath = @"/Users/shogohayashi/voice-input-tool/logs/native-paste-ready.txt";
-
-static void EnsureParentDirectory(NSString *path) {
-    NSString *directory = [path stringByDeletingLastPathComponent];
-    [[NSFileManager defaultManager] createDirectoryAtPath:directory
-                              withIntermediateDirectories:YES
-                                               attributes:nil
-                                                    error:nil];
-}
-
-static void NativeLog(NSString *message) {
-    NSString *path = [WorkDir stringByAppendingPathComponent:@"logs/native-status.log"];
-    EnsureParentDirectory(path);
-    NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], message];
-    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
-    if (!handle) {
-        [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
-        handle = [NSFileHandle fileHandleForWritingAtPath:path];
-    }
-    [handle seekToEndOfFile];
-    [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-    [handle closeFile];
-}
-
-static pid_t CurrentFrontmostApplicationPid(void) {
-    NSRunningApplication *frontmost = [[NSWorkspace sharedWorkspace] frontmostApplication];
-    if (!frontmost) {
-        return 0;
-    }
-
-    pid_t pid = [frontmost processIdentifier];
-    return pid == getpid() ? 0 : pid;
-}
+#import "VITCursorMicIndicator.h"
+#import "VITGlobalHotKey.h"
+#import "VITNativeSupport.h"
+#import "VITSetupGuideController.h"
+#import "VITTextPasteController.h"
 
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 @property(nonatomic, strong) NSStatusItem *statusItem;
 @property(nonatomic, strong) NSMenuItem *toggleItem;
 @property(nonatomic, strong) NSMenuItem *llmItem;
 @property(nonatomic, strong) NSTask *engineTask;
+@property(nonatomic, strong) NSTask *settingsTask;
+@property(nonatomic, assign) BOOL restartEngineWhenIdle;
 @property(nonatomic, strong) NSTimer *outputTimer;
 @property(nonatomic, assign) unsigned long long outputOffset;
+@property(nonatomic, strong) NSMutableData *pendingOutput;
+@property(nonatomic, strong) NSMutableSet<NSString *> *pendingRequests;
 @property(nonatomic, assign) NSTimeInterval lastReadyHeartbeat;
 @property(nonatomic, assign) NSTimeInterval lastStatusModified;
 @property(nonatomic, copy) NSString *currentStatus;
 @property(nonatomic, copy) NSString *currentStatusTitle;
 @property(nonatomic, assign) NSUInteger statusAnimationFrame;
-@property(nonatomic, assign) EventHotKeyRef hotKeyRef;
-@property(nonatomic, assign) EventHandlerRef hotKeyHandlerRef;
+@property(nonatomic, strong) VITCursorMicIndicator *cursorMicIndicator;
+@property(nonatomic, strong) VITGlobalHotKey *globalHotKey;
+@property(nonatomic, strong) VITTextPasteController *pasteController;
+@property(nonatomic, strong) VITSetupGuideController *setupGuide;
 - (void)toggleRecording:(id)sender;
 - (void)toggleRecordingForTargetPid:(pid_t)targetPid;
+- (BOOL)showStatusIconIfAvailable;
+- (void)setStatusButtonTitle:(NSString *)title;
 @end
-
-static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef event, void *userData) {
-    AppDelegate *delegate = (__bridge AppDelegate *)userData;
-    [delegate toggleRecordingForTargetPid:CurrentFrontmostApplicationPid()];
-    return noErr;
-}
 
 @implementation AppDelegate
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
-    NativeLog(@"applicationDidFinishLaunching");
+    VITNativeLog(@"applicationDidFinishLaunching");
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
-    [self requestAccessibilityIfNeeded];
+    self.cursorMicIndicator = [[VITCursorMicIndicator alloc] init];
+    __weak AppDelegate *weakSelf = self;
+    self.globalHotKey = [[VITGlobalHotKey alloc] initWithHandler:^{
+        [weakSelf toggleRecordingForTargetPid:VITCurrentFrontmostApplicationPid()];
+    }];
+    self.pasteController = [[VITTextPasteController alloc] initWithStatusTitleHandler:^(NSString *title) {
+        [weakSelf setStatusButtonTitle:title];
+    }];
+    BOOL showSetupGuide = VITSetupGuideNeedsPresentation(VITResolvedWorkDir());
+    if (!showSetupGuide) [self requestAccessibilityIfNeeded];
     [self setupStatusItem];
     [self registerConfiguredHotKey];
     [self prepareOutputPolling];
     [self startEngine];
+    if (showSetupGuide) [self openSetupGuide:nil];
 }
 
 - (void)requestAccessibilityIfNeeded {
     NSDictionary *options = @{(__bridge id)kAXTrustedCheckOptionPrompt: @YES};
     BOOL trusted = AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)options);
-    NativeLog([NSString stringWithFormat:@"accessibility trusted: %@", trusted ? @"yes" : @"no"]);
+    VITNativeLog([NSString stringWithFormat:@"accessibility trusted: %@", trusted ? @"yes" : @"no"]);
 }
 
 - (void)setupStatusItem {
-    NativeLog(@"setupStatusItem start");
+    VITNativeLog(@"setupStatusItem start");
     self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
-    self.statusItem.button.title = @"🎙";
+    if (![self showStatusIconIfAvailable]) {
+        [self setStatusButtonTitle:@"🎙"];
+    }
 
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Voice Input Tool"];
 
@@ -104,6 +81,21 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
     self.llmItem.target = self;
     [menu addItem:self.llmItem];
 
+    NSMenuItem *historyItem = [[NSMenuItem alloc] initWithTitle:@"録音履歴を開く"
+                                                      action:@selector(openRecordingHistory:)
+                                               keyEquivalent:@""];
+    historyItem.target = self;
+    [menu addItem:historyItem];
+
+    NSString *version = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    if ([version length] > 0) {
+        NSMenuItem *versionItem = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"バージョン %@", version]
+                                                            action:nil
+                                                     keyEquivalent:@""];
+        versionItem.enabled = NO;
+        [menu addItem:versionItem];
+    }
+
     NSMenuItem *permissionItem = [[NSMenuItem alloc] initWithTitle:@"アクセシビリティ許可を確認"
                                                             action:@selector(checkAccessibility:)
                                                      keyEquivalent:@""];
@@ -116,6 +108,12 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
     settingsItem.target = self;
     [menu addItem:settingsItem];
 
+    NSMenuItem *setupItem = [[NSMenuItem alloc] initWithTitle:@"はじめての設定..."
+                                                    action:@selector(openSetupGuide:)
+                                             keyEquivalent:@""];
+    setupItem.target = self;
+    [menu addItem:setupItem];
+
     [menu addItem:[NSMenuItem separatorItem]];
 
     NSMenuItem *quitItem = [[NSMenuItem alloc] initWithTitle:@"終了"
@@ -125,22 +123,44 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
     [menu addItem:quitItem];
 
     self.statusItem.menu = menu;
-    NativeLog(@"setupStatusItem complete");
+    VITNativeLog(@"setupStatusItem complete");
+}
+
+- (BOOL)showStatusIconIfAvailable {
+    NSImage *icon = VITStatusBarIcon();
+    if (!icon || !self.statusItem.button) {
+        return NO;
+    }
+
+    self.statusItem.button.title = @"";
+    self.statusItem.button.image = icon;
+    self.statusItem.button.imagePosition = NSImageOnly;
+    self.statusItem.button.toolTip = @"Voice Input Tool";
+    return YES;
+}
+
+- (void)setStatusButtonTitle:(NSString *)title {
+    self.statusItem.button.image = nil;
+    self.statusItem.button.imagePosition = NSNoImage;
+    self.statusItem.button.title = title ?: @"";
+    self.statusItem.button.toolTip = @"Voice Input Tool";
 }
 
 - (NSFileHandle *)appendHandleForPath:(NSString *)path {
-    EnsureParentDirectory(path);
+    VITEnsureParentDirectory(path);
     NSFileManager *fm = [NSFileManager defaultManager];
     if (![fm fileExistsAtPath:path]) {
         [fm createFileAtPath:path contents:nil attributes:nil];
     }
     NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
-    [handle seekToEndOfFile];
+    if (handle) {
+        [handle seekToEndOfFile];
+    }
     return handle;
 }
 
 - (NSDictionary *)loadConfig {
-    NSString *configPath = [WorkDir stringByAppendingPathComponent:@"config.json"];
+    NSString *configPath = VITWorkDirPath(@"config.json");
     NSData *data = [NSData dataWithContentsOfFile:configPath];
     if (!data) {
         return @{};
@@ -149,7 +169,7 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
     NSError *error = nil;
     id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
     if (![json isKindOfClass:[NSDictionary class]]) {
-        NativeLog([NSString stringWithFormat:@"config parse failed: %@", error]);
+        VITNativeLog([NSString stringWithFormat:@"config parse failed: %@", error]);
         return @{};
     }
     return (NSDictionary *)json;
@@ -162,131 +182,41 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
         hotKey = @"<ctrl>+<shift>+<space>";
     }
 
-    UInt32 keyCode = 0;
-    UInt32 modifiers = 0;
-    if (![self parseHotKey:hotKey keyCode:&keyCode modifiers:&modifiers]) {
-        NativeLog([NSString stringWithFormat:@"native hotkey parse failed: %@", hotKey]);
-        return;
-    }
-
-    if (self.hotKeyRef) {
-        UnregisterEventHotKey(self.hotKeyRef);
-        self.hotKeyRef = NULL;
-    }
-    if (!self.hotKeyHandlerRef) {
-        EventTypeSpec eventType = {kEventClassKeyboard, kEventHotKeyPressed};
-        OSStatus handlerStatus = InstallEventHandler(
-            GetApplicationEventTarget(),
-            HotKeyPressedHandler,
-            1,
-            &eventType,
-            (__bridge void *)self,
-            &_hotKeyHandlerRef
-        );
-        if (handlerStatus != noErr) {
-            NativeLog([NSString stringWithFormat:@"native hotkey handler failed: %d", handlerStatus]);
-            return;
-        }
-    }
-
-    EventHotKeyID hotKeyId;
-    hotKeyId.signature = 'VITK';
-    hotKeyId.id = 1;
-    OSStatus status = RegisterEventHotKey(
-        keyCode,
-        modifiers,
-        hotKeyId,
-        GetApplicationEventTarget(),
-        0,
-        &_hotKeyRef
-    );
-    NativeLog([NSString stringWithFormat:@"native hotkey register: %@ key=%u modifiers=%u status=%d", hotKey, keyCode, modifiers, status]);
-}
-
-- (BOOL)parseHotKey:(NSString *)hotKey keyCode:(UInt32 *)keyCode modifiers:(UInt32 *)modifiers {
-    NSArray<NSString *> *parts = [hotKey componentsSeparatedByString:@"+"];
-    BOOL foundKey = NO;
-    UInt32 parsedModifiers = 0;
-    UInt32 parsedKeyCode = 0;
-
-    for (NSString *rawPart in parts) {
-        NSString *part = [[rawPart stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
-        if ([part isEqualToString:@"<cmd>"] || [part isEqualToString:@"<command>"]) {
-            parsedModifiers |= cmdKey;
-        } else if ([part isEqualToString:@"<shift>"]) {
-            parsedModifiers |= shiftKey;
-        } else if ([part isEqualToString:@"<ctrl>"] || [part isEqualToString:@"<control>"]) {
-            parsedModifiers |= controlKey;
-        } else if ([part isEqualToString:@"<alt>"] || [part isEqualToString:@"<option>"]) {
-            parsedModifiers |= optionKey;
-        } else {
-            NSString *key = part;
-            if ([key hasPrefix:@"<"] && [key hasSuffix:@">"] && [key length] > 2) {
-                key = [key substringWithRange:NSMakeRange(1, [key length] - 2)];
-            }
-            NSNumber *mapped = [self keyCodeForKey:key];
-            if (!mapped) {
-                return NO;
-            }
-            parsedKeyCode = [mapped unsignedIntValue];
-            foundKey = YES;
-        }
-    }
-
-    if (!foundKey) {
-        return NO;
-    }
-    *keyCode = parsedKeyCode;
-    *modifiers = parsedModifiers;
-    return YES;
-}
-
-- (NSNumber *)keyCodeForKey:(NSString *)key {
-    NSDictionary<NSString *, NSNumber *> *keyCodes = @{
-        @"space": @49, @"tab": @48, @"enter": @36, @"return": @36,
-        @"backspace": @51, @"esc": @53, @"escape": @53,
-        @"left": @123, @"right": @124, @"down": @125, @"up": @126,
-        @"a": @0, @"s": @1, @"d": @2, @"f": @3, @"h": @4, @"g": @5,
-        @"z": @6, @"x": @7, @"c": @8, @"v": @9, @"b": @11,
-        @"q": @12, @"w": @13, @"e": @14, @"r": @15, @"y": @16, @"t": @17,
-        @"1": @18, @"2": @19, @"3": @20, @"4": @21, @"6": @22, @"5": @23,
-        @"=": @24, @"9": @25, @"7": @26, @"-": @27, @"8": @28, @"0": @29,
-        @"]": @30, @"o": @31, @"u": @32, @"[": @33, @"i": @34, @"p": @35,
-        @"l": @37, @"j": @38, @"'": @39, @"k": @40, @";": @41,
-        @"\\": @42, @",": @43, @"/": @44, @"n": @45, @"m": @46, @".": @47,
-        @"`": @50, @"_": @94, @"underscore": @94,
-    };
-    return [keyCodes objectForKey:key];
+    [self.globalHotKey registerHotKey:hotKey];
 }
 
 - (void)startEngine {
     if (self.engineTask && self.engineTask.isRunning) {
         return;
     }
-    NativeLog(@"startEngine");
+    VITNativeLog(@"startEngine");
 
     NSTask *task = [[NSTask alloc] init];
-    task.executableURL = [NSURL fileURLWithPath:PythonPath];
-    task.arguments = @[ScriptPath, @"--headless"];
-    task.currentDirectoryURL = [NSURL fileURLWithPath:WorkDir];
-    task.standardOutput = [self appendHandleForPath:[WorkDir stringByAppendingPathComponent:@"logs/native-engine.out.log"]];
-    task.standardError = [self appendHandleForPath:[WorkDir stringByAppendingPathComponent:@"logs/native-engine.err.log"]];
+    task.executableURL = [NSURL fileURLWithPath:VITPythonPath()];
+    task.arguments = @[VITScriptPath(), @"--headless"];
+    task.currentDirectoryURL = [NSURL fileURLWithPath:VITResolvedWorkDir()];
+    NSMutableDictionary *environment = VITTaskEnvironment();
+    NSDictionary *commandAttributes = [[NSFileManager defaultManager] attributesOfItemAtPath:VITCommandFilePath() error:nil];
+    environment[@"VOICE_INPUT_COMMAND_OFFSET"] = [NSString stringWithFormat:@"%llu", [commandAttributes[NSFileSize] unsignedLongLongValue]];
+    task.environment = environment;
+    task.standardOutput = [self appendHandleForPath:VITWorkDirPath(@"logs/native-engine.out.log")];
+    task.standardError = [self appendHandleForPath:VITWorkDirPath(@"logs/native-engine.err.log")];
     task.terminationHandler = ^(NSTask *finishedTask) {
-        NativeLog([NSString stringWithFormat:@"engine exited: status=%d", finishedTask.terminationStatus]);
+        VITNativeLog([NSString stringWithFormat:@"engine exited: status=%d", finishedTask.terminationStatus]);
     };
     self.engineTask = task;
 
     NSError *error = nil;
     if (![task launchAndReturnError:&error]) {
         NSLog(@"Voice Input Tool engine launch failed: %@", error);
-        NativeLog([NSString stringWithFormat:@"engine launch failed: %@", error]);
+        VITNativeLog([NSString stringWithFormat:@"engine launch failed: %@", error]);
     } else {
-        NativeLog(@"engine launch complete");
+        VITNativeLog(@"engine launch complete");
     }
 }
 
 - (void)restartEngine {
-    NativeLog(@"restartEngine");
+    VITNativeLog(@"restartEngine");
     if (self.engineTask && self.engineTask.isRunning) {
         [self sendCommand:@"quit"];
         [self.engineTask terminate];
@@ -295,13 +225,22 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
     [self startEngine];
 }
 
+- (void)openRecordingHistory:(id)sender {
+    NSString *path = VITWorkDirPath(@"recordings");
+    [[NSFileManager defaultManager] createDirectoryAtPath:path withIntermediateDirectories:YES
+                                             attributes:@{NSFilePosixPermissions: @0700} error:nil];
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:path]];
+}
+
 - (void)prepareOutputPolling {
-    EnsureParentDirectory(OutputFilePath);
-    if (![[NSFileManager defaultManager] fileExistsAtPath:OutputFilePath]) {
-        [[NSFileManager defaultManager] createFileAtPath:OutputFilePath contents:nil attributes:nil];
+    self.pendingOutput = [NSMutableData data];
+    self.pendingRequests = [NSMutableSet set];
+    VITEnsureParentDirectory(VITOutputFilePath());
+    if (![[NSFileManager defaultManager] fileExistsAtPath:VITOutputFilePath()]) {
+        [[NSFileManager defaultManager] createFileAtPath:VITOutputFilePath() contents:nil attributes:nil];
     }
 
-    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:OutputFilePath error:nil];
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:VITOutputFilePath() error:nil];
     self.outputOffset = [[attrs objectForKey:NSFileSize] unsignedLongLongValue];
     self.outputTimer = [NSTimer scheduledTimerWithTimeInterval:0.2
                                                         target:self
@@ -310,7 +249,7 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
                                                        repeats:YES];
     [self writePasteReadyHeartbeat];
     [self pollStatusFile];
-    NativeLog([NSString stringWithFormat:@"output polling start: offset=%llu", self.outputOffset]);
+    VITNativeLog([NSString stringWithFormat:@"output polling start: offset=%llu", self.outputOffset]);
 }
 
 - (void)pollOutputFile:(NSTimer *)timer {
@@ -318,16 +257,17 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
     [self pollStatusFile];
     [self animateStatusIndicator];
 
-    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:OutputFilePath error:nil];
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:VITOutputFilePath() error:nil];
     unsigned long long size = [[attrs objectForKey:NSFileSize] unsignedLongLongValue];
     if (size < self.outputOffset) {
         self.outputOffset = 0;
+        [self.pendingOutput setLength:0];
     }
     if (size == self.outputOffset) {
         return;
     }
 
-    NSFileHandle *handle = [NSFileHandle fileHandleForReadingAtPath:OutputFilePath];
+    NSFileHandle *handle = [NSFileHandle fileHandleForReadingAtPath:VITOutputFilePath()];
     if (!handle) {
         return;
     }
@@ -337,18 +277,24 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
     self.outputOffset += [data length];
     [handle closeFile];
 
-    NSString *chunk = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    NSArray<NSString *> *lines = [chunk componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-    for (NSString *line in lines) {
-        if ([[line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] length] == 0) {
-            continue;
-        }
-        [self handleOutputLine:line];
+    // Decode only complete UTF-8 lines. A poll may split a JSON object or even
+    // one Japanese character across two reads.
+    [self.pendingOutput appendData:data];
+    const unsigned char newline = '\n';
+    NSData *delimiter = [NSData dataWithBytes:&newline length:1];
+    while (YES) {
+        NSRange range = [self.pendingOutput rangeOfData:delimiter options:0
+                                                range:NSMakeRange(0, self.pendingOutput.length)];
+        if (range.location == NSNotFound) break;
+        NSData *lineData = [self.pendingOutput subdataWithRange:NSMakeRange(0, range.location)];
+        [self.pendingOutput replaceBytesInRange:NSMakeRange(0, range.location + 1) withBytes:NULL length:0];
+        NSString *line = [[NSString alloc] initWithData:lineData encoding:NSUTF8StringEncoding];
+        if (line.length > 0) [self handleOutputLine:line];
     }
 }
 
 - (void)pollStatusFile {
-    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:StatusFilePath error:nil];
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:VITStatusFilePath() error:nil];
     NSDate *modified = [attrs objectForKey:NSFileModificationDate];
     if (!modified) {
         return;
@@ -360,7 +306,7 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
     }
     self.lastStatusModified = modifiedTime;
 
-    NSData *data = [NSData dataWithContentsOfFile:StatusFilePath];
+    NSData *data = [NSData dataWithContentsOfFile:VITStatusFilePath()];
     if (!data) {
         return;
     }
@@ -368,7 +314,7 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
     NSError *error = nil;
     id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
     if (![json isKindOfClass:[NSDictionary class]]) {
-        NativeLog([NSString stringWithFormat:@"status parse failed: %@", error]);
+        VITNativeLog([NSString stringWithFormat:@"status parse failed: %@", error]);
         return;
     }
 
@@ -393,7 +339,9 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
     if ([title isKindOfClass:[NSString class]] && [title length] > 0) {
         self.currentStatusTitle = title;
         if (![self.currentStatus isEqualToString:@"hearing"]) {
-            self.statusItem.button.title = title;
+            if (![self.currentStatus isEqualToString:@"idle"] || ![self showStatusIconIfAvailable]) {
+                [self setStatusButtonTitle:title];
+            }
         }
     }
     if ([recordTitle isKindOfClass:[NSString class]] && [recordTitle length] > 0) {
@@ -402,15 +350,20 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
     if ([llmTitle isKindOfClass:[NSString class]] && [llmTitle length] > 0) {
         self.llmItem.title = llmTitle;
     }
-    NativeLog([NSString stringWithFormat:@"status updated: %@", status ?: @"unknown"]);
+    [self.cursorMicIndicator updateForStatus:self.currentStatus];
+    if (self.restartEngineWhenIdle && [self.currentStatus isEqualToString:@"idle"]) {
+        self.restartEngineWhenIdle = NO;
+        [self restartEngine];
+    }
+    VITNativeLog([NSString stringWithFormat:@"status updated: %@", status ?: @"unknown"]);
 }
 
 - (void)animateStatusIndicator {
     if (![self.currentStatus isEqualToString:@"hearing"]) {
         return;
     }
-    NSArray<NSString *> *frames = @[@"•••", @"•  ", @"•• "];
-    self.statusItem.button.title = [frames objectAtIndex:(self.statusAnimationFrame % [frames count])];
+    NSArray<NSString *> *frames = @[@"● 聞き取り中", @"●● 聞き取り中", @"●●● 聞き取り中"];
+    [self setStatusButtonTitle:[frames objectAtIndex:(self.statusAnimationFrame % [frames count])]];
     self.statusAnimationFrame += 1;
 }
 
@@ -423,9 +376,9 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
 
 - (void)writePasteReadyHeartbeat {
     self.lastReadyHeartbeat = [[NSDate date] timeIntervalSince1970];
-    EnsureParentDirectory(PasteReadyPath);
+    VITEnsureParentDirectory(VITPasteReadyPath());
     NSString *content = [NSString stringWithFormat:@"%f\n", self.lastReadyHeartbeat];
-    [content writeToFile:PasteReadyPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [content writeToFile:VITPasteReadyPath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
 - (void)handleOutputLine:(NSString *)line {
@@ -433,7 +386,7 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
     NSError *error = nil;
     id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
     if (![json isKindOfClass:[NSDictionary class]]) {
-        NativeLog([NSString stringWithFormat:@"output parse failed: %@", error]);
+        VITNativeLog([NSString stringWithFormat:@"output parse failed: %@", error]);
         return;
     }
 
@@ -441,7 +394,7 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
     NSString *text = [payload objectForKey:@"text"];
     NSNumber *pidNumber = [payload objectForKey:@"pid"];
     if (![text isKindOfClass:[NSString class]] || [text length] == 0) {
-        NativeLog(@"output ignored: empty text");
+        VITNativeLog(@"output ignored: empty text");
         return;
     }
 
@@ -449,92 +402,35 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
     if ([pidNumber respondsToSelector:@selector(intValue)]) {
         pid = [pidNumber intValue];
     }
-    [self pasteText:text targetPid:pid];
-}
-
-- (void)pasteText:(NSString *)text targetPid:(pid_t)pid {
-    NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
-    [pasteboard clearContents];
-    [pasteboard setString:text forType:NSPasteboardTypeString];
-    NativeLog([NSString stringWithFormat:@"paste requested: pid=%d length=%lu", pid, (unsigned long)[text length]]);
-
-    if (!AXIsProcessTrusted()) {
-        NativeLog(@"paste skipped: accessibility not trusted; text copied to clipboard");
-        [self requestAccessibilityIfNeeded];
-        return;
+    NSString *requestID = payload[@"request_id"];
+    if (![requestID isKindOfClass:[NSString class]] || ![[NSUUID alloc] initWithUUIDString:requestID]) {
+        requestID = nil; // Compatibility with older engines.
     }
-
-    if (pid > 0) {
-        NSRunningApplication *target = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
-        if (target) {
-            [target activateWithOptions:NSApplicationActivateAllWindows];
+    NSString *receiptPath = requestID ? VITWorkDirPath([NSString stringWithFormat:@"logs/delivery-receipts/%@.json", requestID]) : nil;
+    if (requestID && ([self.pendingRequests containsObject:requestID] ||
+                      [[NSFileManager defaultManager] fileExistsAtPath:receiptPath])) return;
+    if (requestID) [self.pendingRequests addObject:requestID];
+    void (^completion)(NSString *) = ^(NSString *status) {
+        if (!requestID) return;
+        NSDictionary *receipt = @{@"request_id": requestID, @"status": status};
+        NSData *receiptData = [NSJSONSerialization dataWithJSONObject:receipt options:0 error:nil];
+        VITEnsureParentDirectory(receiptPath);
+        NSError *writeError = nil;
+        if (![receiptData writeToFile:receiptPath options:NSDataWritingAtomic error:&writeError]) {
+            VITNativeLog([NSString stringWithFormat:@"receipt write failed: %@", writeError]);
+        } else {
+            [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @0600}
+                                             ofItemAtPath:receiptPath error:nil];
+            [self.pendingRequests removeObject:requestID];
         }
-    }
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.18 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self sendPasteShortcutToPid:pid];
-    });
-}
-
-- (void)postEvent:(CGEventRef)event targetPid:(pid_t)pid {
-    if (pid > 0) {
-        CGEventPostToPid(pid, event);
-    } else {
-        CGEventPost(kCGHIDEventTap, event);
-    }
-}
-
-- (void)postKey:(CGKeyCode)keycode down:(BOOL)down flags:(CGEventFlags)flags targetPid:(pid_t)pid {
-    CGEventRef event = CGEventCreateKeyboardEvent(NULL, keycode, down);
-    CGEventSetFlags(event, flags);
-    [self postEvent:event targetPid:pid];
-    CFRelease(event);
-}
-
-- (void)sendPasteShortcutToPid:(pid_t)pid {
-    CGEventFlags flags = kCGEventFlagMaskCommand;
-    [self postKey:55 down:YES flags:flags targetPid:pid];
-    usleep(10000);
-    [self postKey:9 down:YES flags:flags targetPid:pid];
-    usleep(10000);
-    [self postKey:9 down:NO flags:flags targetPid:pid];
-    usleep(10000);
-    [self postKey:55 down:NO flags:0 targetPid:pid];
-    NativeLog([NSString stringWithFormat:@"paste shortcut sent: pid=%d", pid]);
-}
-
-- (void)sendTextDirectly:(NSString *)text targetPid:(pid_t)pid {
-    NSUInteger length = [text length];
-    for (NSUInteger index = 0; index < length; ) {
-        NSRange range = [text rangeOfComposedCharacterSequenceAtIndex:index];
-        NSUInteger charLength = range.length;
-        UniChar *chars = malloc(sizeof(UniChar) * charLength);
-        if (!chars) {
-            NativeLog(@"direct text failed: malloc");
-            [self sendPasteShortcutToPid:pid];
-            return;
-        }
-        [text getCharacters:chars range:range];
-
-        CGEventRef keyDown = CGEventCreateKeyboardEvent(NULL, 0, true);
-        CGEventKeyboardSetUnicodeString(keyDown, charLength, chars);
-        [self postEvent:keyDown targetPid:pid];
-        CFRelease(keyDown);
-
-        CGEventRef keyUp = CGEventCreateKeyboardEvent(NULL, 0, false);
-        CGEventKeyboardSetUnicodeString(keyUp, charLength, chars);
-        [self postEvent:keyUp targetPid:pid];
-        CFRelease(keyUp);
-
-        free(chars);
-        index = NSMaxRange(range);
-        usleep(3000);
-    }
-    NativeLog([NSString stringWithFormat:@"direct text sent: pid=%d length=%lu", pid, (unsigned long)[text length]]);
+    };
+    NSNumber *expiresAt = payload[@"expires_at"];
+    NSTimeInterval deadline = [expiresAt respondsToSelector:@selector(doubleValue)] ? [expiresAt doubleValue] : 0;
+    [self.pasteController pasteText:text targetPid:pid expiresAt:deadline completion:completion];
 }
 
 - (BOOL)sendCommand:(NSString *)command targetPid:(pid_t)targetPid {
-    NSFileHandle *handle = [self appendHandleForPath:CommandFilePath];
+    NSFileHandle *handle = [self appendHandleForPath:VITCommandFilePath()];
     if (!handle) {
         return NO;
     }
@@ -553,7 +449,7 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
     if (jsonData) {
         line = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
     } else {
-        NativeLog([NSString stringWithFormat:@"command json failed: %@", error]);
+        VITNativeLog([NSString stringWithFormat:@"command json failed: %@", error]);
         line = command;
     }
     NSData *data = [[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
@@ -563,11 +459,11 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
 }
 
 - (void)toggleRecording:(id)sender {
-    [self toggleRecordingForTargetPid:CurrentFrontmostApplicationPid()];
+    [self toggleRecordingForTargetPid:VITCurrentFrontmostApplicationPid()];
 }
 
 - (void)toggleRecordingForTargetPid:(pid_t)targetPid {
-    NativeLog([NSString stringWithFormat:@"toggleRecording target_pid=%d", targetPid]);
+    VITNativeLog([NSString stringWithFormat:@"toggleRecording target_pid=%d", targetPid]);
     BOOL wasRunning = self.engineTask && self.engineTask.isRunning;
     [self startEngine];
     if (wasRunning) {
@@ -585,7 +481,7 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
 }
 
 - (void)toggleLLM:(id)sender {
-    NativeLog(@"toggleLLM");
+    VITNativeLog(@"toggleLLM");
     BOOL wasRunning = self.engineTask && self.engineTask.isRunning;
     [self startEngine];
     if (wasRunning) {
@@ -599,41 +495,87 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
 }
 
 - (void)checkAccessibility:(id)sender {
-    NativeLog(@"checkAccessibility");
+    VITNativeLog(@"checkAccessibility");
     [self requestAccessibilityIfNeeded];
-    NSURL *url = [NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"];
-    [[NSWorkspace sharedWorkspace] openURL:url];
+    VITOpenAccessibilitySettings();
 }
 
 - (void)openSettings:(id)sender {
-    NativeLog(@"openSettings");
+    VITNativeLog(@"openSettings");
+    if (self.settingsTask.isRunning) {
+        NSRunningApplication *settingsApp = [NSRunningApplication runningApplicationWithProcessIdentifier:self.settingsTask.processIdentifier];
+        [settingsApp activateWithOptions:NSApplicationActivateIgnoringOtherApps];
+        return;
+    }
+    NSDictionary *settingsBefore = [self settingsFileVersions];
     NSTask *task = [[NSTask alloc] init];
-    task.executableURL = [NSURL fileURLWithPath:PythonPath];
-    task.arguments = @[ScriptPath, @"--settings"];
-    task.currentDirectoryURL = [NSURL fileURLWithPath:WorkDir];
-    task.standardOutput = [self appendHandleForPath:[WorkDir stringByAppendingPathComponent:@"logs/native-settings.out.log"]];
-    task.standardError = [self appendHandleForPath:[WorkDir stringByAppendingPathComponent:@"logs/native-settings.err.log"]];
+    self.settingsTask = task;
+    task.executableURL = [NSURL fileURLWithPath:VITPythonPath()];
+    task.arguments = @[VITScriptPath(), @"--settings"];
+    task.currentDirectoryURL = [NSURL fileURLWithPath:VITResolvedWorkDir()];
+    task.environment = VITTaskEnvironment();
+    task.standardOutput = [self appendHandleForPath:VITWorkDirPath(@"logs/native-settings.out.log")];
+    task.standardError = [self appendHandleForPath:VITWorkDirPath(@"logs/native-settings.err.log")];
 
     __weak AppDelegate *weakSelf = self;
     task.terminationHandler = ^(NSTask *finishedTask) {
-        NativeLog([NSString stringWithFormat:@"settings exited: status=%d", finishedTask.terminationStatus]);
+        VITNativeLog([NSString stringWithFormat:@"settings exited: status=%d", finishedTask.terminationStatus]);
         dispatch_async(dispatch_get_main_queue(), ^{
             AppDelegate *strongSelf = weakSelf;
             if (strongSelf) {
+                if (strongSelf.settingsTask == finishedTask) strongSelf.settingsTask = nil;
+                [strongSelf.setupGuide refreshConfiguredHotKey];
+                // The shortcut is suspended while settings is open so the
+                // capture field can receive the currently configured keys too.
                 [strongSelf registerConfiguredHotKey];
-                [strongSelf restartEngine];
+                if (![settingsBefore isEqual:[strongSelf settingsFileVersions]]) {
+                    if (!strongSelf.engineTask.isRunning || [strongSelf.currentStatus isEqualToString:@"idle"]) {
+                        [strongSelf restartEngine];
+                    } else {
+                        strongSelf.restartEngineWhenIdle = YES;
+                    }
+                }
             }
         });
     };
 
+    [self.globalHotKey invalidate];
+    VITNativeLog(@"native hotkey suspended for settings");
     NSError *error = nil;
     if (![task launchAndReturnError:&error]) {
-        NativeLog([NSString stringWithFormat:@"settings launch failed: %@", error]);
+        self.settingsTask = nil;
+        [self registerConfiguredHotKey];
+        VITNativeLog([NSString stringWithFormat:@"settings launch failed: %@", error]);
     }
 }
 
+- (NSDictionary *)settingsFileVersions {
+    // Only inspect metadata. The native shell never reads an API-key value.
+    NSMutableDictionary *versions = [NSMutableDictionary dictionary];
+    for (NSString *filename in @[@"config.json", @".env"]) {
+        NSDictionary *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:VITWorkDirPath(filename) error:nil];
+        versions[filename] = @[
+            attributes[NSFileModificationDate] ?: NSNull.null,
+            attributes[NSFileSystemFileNumber] ?: NSNull.null,
+            attributes[NSFileSize] ?: NSNull.null,
+        ];
+    }
+    return versions;
+}
+
+- (void)openSetupGuide:(id)sender {
+    (void)sender;
+    if (!self.setupGuide) {
+        __weak AppDelegate *weakSelf = self;
+        self.setupGuide = [[VITSetupGuideController alloc] initWithWorkDirectory:VITResolvedWorkDir()
+            settingsHandler:^{ [weakSelf openSettings:nil]; }
+            accessibilityHandler:^{ [weakSelf checkAccessibility:nil]; }];
+    }
+    [self.setupGuide showGuide];
+}
+
 - (void)quit:(id)sender {
-    NativeLog(@"quit");
+    VITNativeLog(@"quit");
     [self sendCommand:@"quit"];
     if (self.engineTask && self.engineTask.isRunning) {
         [self.engineTask terminate];
@@ -642,17 +584,11 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
-    NativeLog(@"applicationWillTerminate");
+    VITNativeLog(@"applicationWillTerminate");
     [self.outputTimer invalidate];
-    [[NSFileManager defaultManager] removeItemAtPath:PasteReadyPath error:nil];
-    if (self.hotKeyRef) {
-        UnregisterEventHotKey(self.hotKeyRef);
-        self.hotKeyRef = NULL;
-    }
-    if (self.hotKeyHandlerRef) {
-        RemoveEventHandler(self.hotKeyHandlerRef);
-        self.hotKeyHandlerRef = NULL;
-    }
+    [self.cursorMicIndicator hide];
+    [[NSFileManager defaultManager] removeItemAtPath:VITPasteReadyPath() error:nil];
+    [self.globalHotKey invalidate];
     [self sendCommand:@"quit"];
     if (self.engineTask && self.engineTask.isRunning) {
         [self.engineTask terminate];
@@ -662,10 +598,12 @@ static OSStatus HotKeyPressedHandler(EventHandlerCallRef nextHandler, EventRef e
 @end
 
 int main(int argc, const char * argv[]) {
+    (void)argc;
+    (void)argv;
     @autoreleasepool {
-        NativeLog(@"main start");
+        VITNativeLog(@"main start");
         NSApplication *app = [NSApplication sharedApplication];
-        NativeLog(@"sharedApplication complete");
+        VITNativeLog(@"sharedApplication complete");
         AppDelegate *delegate = [[AppDelegate alloc] init];
         app.delegate = delegate;
         [app run];

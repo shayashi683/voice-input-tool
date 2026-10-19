@@ -1,0 +1,146 @@
+#!/bin/bash
+set -euo pipefail
+
+LOG_FILE="/tmp/voice-input-tool-pkg-install.log"
+exec >> "$LOG_FILE" 2>&1
+
+INSTALLER_ROOT="/Library/Application Support/VoiceInputToolInstaller"
+SOURCE_PAYLOAD="$INSTALLER_ROOT/payload"
+
+if [ "$(/usr/bin/uname -m)" != "arm64" ]; then
+    echo "VoiceInputTool requires an Apple Silicon Mac."
+    exit 1
+fi
+
+macos_major="$(/usr/bin/sw_vers -productVersion | /usr/bin/awk -F. '{print $1}')"
+if [ -z "$macos_major" ] || [ "$macos_major" -lt 13 ]; then
+    echo "VoiceInputTool requires macOS 13 or later."
+    exit 1
+fi
+
+console_user="$(/usr/bin/stat -f %Su /dev/console)"
+if [ -z "$console_user" ] || [ "$console_user" = "root" ] || [ "$console_user" = "loginwindow" ]; then
+    echo "Could not determine logged-in user: $console_user"
+    exit 1
+fi
+
+user_home="$(/usr/bin/dscl . -read "/Users/$console_user" NFSHomeDirectory | /usr/bin/awk '{print $2}')"
+if [ -z "$user_home" ] || [ ! -d "$user_home" ]; then
+    echo "Could not determine home directory for $console_user"
+    exit 1
+fi
+
+install_dir="$user_home/Library/Application Support/VoiceInputTool"
+app_path="/Applications/VoiceInputTool.app"
+user_script="/tmp/voice-input-tool-user-install-$console_user.sh"
+
+/bin/mkdir -p "$install_dir"
+
+for item in README.md requirements.txt start.sh voice_input.py native packaging scripts voice_input_tool tests; do
+    /bin/rm -rf "$install_dir/$item"
+    /bin/cp -R "$SOURCE_PAYLOAD/$item" "$install_dir/$item"
+done
+
+for item in .python .venv-framework models; do
+    if [ -e "$SOURCE_PAYLOAD/$item" ]; then
+        /bin/rm -rf "$install_dir/$item"
+        /bin/cp -R "$SOURCE_PAYLOAD/$item" "$install_dir/$item"
+    fi
+done
+
+/bin/rm -rf "$user_home/Applications/VoiceInputTool.app"
+/usr/sbin/chown -R "$console_user":staff "$install_dir"
+/bin/chmod -R u+rwX "$install_dir"
+
+/bin/cat > "$user_script" <<SCRIPT
+#!/bin/bash
+set -euo pipefail
+cd "$install_dir"
+
+repair_bundled_python() {
+    local runtime_python
+    runtime_python="\$(/usr/bin/find "$install_dir/.python" -path '*/bin/python3' -perm -111 -print 2>/dev/null | /usr/bin/head -n 1 || true)"
+    if [ -n "\$runtime_python" ] && [ -d "$install_dir/.venv-framework/bin" ]; then
+        /bin/ln -sfn "\$runtime_python" "$install_dir/.venv-framework/bin/python3"
+        /bin/ln -sfn python3 "$install_dir/.venv-framework/bin/python"
+        /bin/ln -sfn python3 "$install_dir/.venv-framework/bin/python3.11"
+        /bin/cat > "$install_dir/.venv-framework/pyvenv.cfg" <<PYVENV
+home = \$(/usr/bin/dirname "\$runtime_python")
+include-system-site-packages = false
+version = 3.11
+PYVENV
+    fi
+}
+
+download_runtime() {
+    local runtime_tmp archive_path archive_sha actual_sha line kind sha name size part_path
+    runtime_tmp="\$(/usr/bin/mktemp -d /tmp/voice-input-runtime.XXXXXX)"
+    archive_path="\$runtime_tmp/@RUNTIME_ARCHIVE_NAME@"
+
+    echo "Downloading VoiceInputTool runtime manifest"
+    /usr/bin/curl -fsSL --retry 3 --retry-delay 2 "@RUNTIME_BASE_URL@/@RUNTIME_MANIFEST_NAME@" -o "\$runtime_tmp/manifest"
+
+    archive_sha=""
+    while IFS=' ' read -r kind sha name size; do
+        [ -z "\$kind" ] && continue
+        case "\$kind" in
+            archive)
+                archive_sha="\$sha"
+                ;;
+            part)
+                part_path="\$runtime_tmp/\$name"
+                echo "Downloading runtime part: \$name"
+                /usr/bin/curl -fL --retry 3 --retry-delay 2 "@RUNTIME_BASE_URL@/\$name" -o "\$part_path"
+                actual_sha="\$(/usr/bin/shasum -a 256 "\$part_path" | /usr/bin/awk '{print \$1}')"
+                if [ "\$actual_sha" != "\$sha" ]; then
+                    echo "Runtime part checksum mismatch: \$name"
+                    return 1
+                fi
+                ;;
+        esac
+    done < "\$runtime_tmp/manifest"
+
+    /bin/cat "\$runtime_tmp"/@RUNTIME_ARCHIVE_NAME@.part-* > "\$archive_path"
+    if [ -n "\$archive_sha" ]; then
+        actual_sha="\$(/usr/bin/shasum -a 256 "\$archive_path" | /usr/bin/awk '{print \$1}')"
+        if [ "\$actual_sha" != "\$archive_sha" ]; then
+            echo "Runtime archive checksum mismatch"
+            return 1
+        fi
+    fi
+
+    /usr/bin/tar -xzf "\$archive_path" -C "$install_dir"
+    /bin/rm -rf "\$runtime_tmp"
+}
+
+runtime_ready() {
+    local model_dir="$install_dir/models/sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01"
+    [ -x "$install_dir/.venv-framework/bin/python3" ] &&
+    [ -f "\$model_dir/encoder-epoch-99-avg-1.int8.onnx" ] &&
+    [ -f "\$model_dir/decoder-epoch-99-avg-1.int8.onnx" ] &&
+    [ -f "\$model_dir/joiner-epoch-99-avg-1.int8.onnx" ] &&
+    [ -f "\$model_dir/tokens.txt" ]
+}
+
+repair_bundled_python
+if ! runtime_ready; then
+    download_runtime || echo "Bundled runtime download failed; falling back to online setup"
+    repair_bundled_python
+fi
+
+if runtime_ready; then
+    APP_BUNDLE_PATH="$app_path" APP_WORKDIR="~/Library/Application Support/VoiceInputTool" ./scripts/install_mac_app.sh --skip-deps --skip-model --skip-app
+else
+    APP_BUNDLE_PATH="$app_path" APP_WORKDIR="~/Library/Application Support/VoiceInputTool" ./scripts/install_mac_app.sh --skip-app
+fi
+SCRIPT
+/usr/sbin/chown "$console_user":staff "$user_script"
+/bin/chmod 700 "$user_script"
+
+/usr/bin/sudo -u "$console_user" /bin/bash "$user_script"
+/bin/rm -f "$user_script"
+
+/usr/bin/sudo -u "$console_user" /usr/bin/open "$app_path" || true
+/bin/rm -rf "$INSTALLER_ROOT"
+
+exit 0

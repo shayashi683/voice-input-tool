@@ -1,13 +1,17 @@
 #!/bin/bash
-cd ~/voice-input-tool
+set -e
 
-APP_LAUNCHER="$HOME/Applications/VoiceInputTool.app/Contents/MacOS/VoiceInputTool"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+export VOICE_INPUT_TOOL_DIR="$SCRIPT_DIR"
+
+APP_LAUNCHER="/Applications/VoiceInputTool.app/Contents/MacOS/VoiceInputTool"
+if [ ! -x "$APP_LAUNCHER" ]; then
+    APP_LAUNCHER="$HOME/Applications/VoiceInputTool.app/Contents/MacOS/VoiceInputTool"
+fi
 if [ -x "$APP_LAUNCHER" ] && [ $# -eq 0 ]; then
     exec "$APP_LAUNCHER"
 fi
 
 source .venv-framework/bin/activate
-if [ -f .env ]; then
-    export $(grep -v '^#' .env | xargs)
-fi
-python3 voice_input.py "$@"
+exec python3 voice_input.py "$@"

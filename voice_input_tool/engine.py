@@ -7,57 +7,37 @@ Mac Mini (Apple Silicon) 向け ローカル音声入力ツール
   録音開始/停止、設定画面、終了
 """
 
-import argparse
-import os
-import signal
-import sys
-import time
-import wave
-import numpy as np
 import threading
 import logging
-from voice_input_tool.app_paths import LOG_DIR, MODEL_DIR
-from voice_input_tool.audio_constants import BLOCK_SIZE, CHANNELS, SAMPLE_RATE
-from voice_input_tool.audio_devices import resolve_input_device
-from voice_input_tool.audio_pipeline import AudioActivityTracker
+from voice_input_tool.audio_recorder import BufferedAudioRecorder
+from voice_input_tool.audio_devices import stable_input_device_id
+from voice_input_tool.audio_monitor import AudioDeviceMonitor
+from voice_input_tool.audio_constants import (
+    PRE_ROLL_SECONDS,
+)
+from voice_input_tool.audio_pipeline import AudioActivityTracker, AudioStatusDispatcher
 from voice_input_tool.app_status import AppStatusController
-from voice_input_tool.config import load_config, save_config
-from voice_input_tool.llm_correction import configure_llm, llm_correct
-from voice_input_tool.log_utils import truncate_for_log
+from voice_input_tool.config import load_config, normalize_config, save_config
+from voice_input_tool.hotkeys import DEFAULT_RECORD_HOTKEY, hotkey_to_display
+from voice_input_tool.logging_setup import configure_logging
 from voice_input_tool.macos_text import (
-    copy_to_clipboard,
     get_frontmost_application,
-    insert_text_at_cursor,
-    request_accessibility_permission,
     target_pid as app_target_pid,
 )
-from voice_input_tool.native_bridge import (
-    NativeCommandReader,
-    ensure_bridge_files,
-    native_paste_bridge_ready,
-    parse_command_line,
-    write_output,
-)
 from voice_input_tool.notifications import notify_user
-from voice_input_tool.speech_engine import create_recognizer, recognize_speech
-from voice_input_tool.status_bar_diagnostics import install_status_bar_diagnostics
-
-# ファイルログ設定
-_log_dir = str(LOG_DIR)
-os.makedirs(_log_dir, exist_ok=True)
-logging.basicConfig(
-    filename=os.path.join(_log_dir, "voice-input.log"),
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+from voice_input_tool.statuses import (
+    IDLE,
+    LISTENING,
+    PROCESSING,
+    STARTING,
 )
-log = logging.getLogger("voice_input")
-_error_handler = logging.FileHandler(os.path.join(_log_dir, "voice-input-error.log"), encoding="utf-8")
-_error_handler.setLevel(logging.ERROR)
-_error_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-logging.getLogger().addHandler(_error_handler)
+from voice_input_tool.recording_store import RecordingStore
+from voice_input_tool.recording_processor import RecordingProcessor
+from voice_input_tool.text_delivery import TextDeliveryService
+from voice_input_tool.transcription import TranscriptionService
 
-# 音声入力
-import sounddevice as sd
+configure_logging()
+log = logging.getLogger("voice_input")
 
 # メニューバーアプリ
 import rumps
@@ -66,6 +46,8 @@ try:
     from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
     HAS_APPKIT_APPLICATION = True
 except ImportError:
+    NSApplication = None
+    NSApplicationActivationPolicyAccessory = None
     HAS_APPKIT_APPLICATION = False
 
 # キーボードホットキー
@@ -73,23 +55,15 @@ try:
     from pynput import keyboard
     HAS_HOTKEY = True
 except ImportError:
+    keyboard = None
     HAS_HOTKEY = False
 
 try:
     from PyObjCTools import AppHelper
     HAS_APP_HELPER = True
 except ImportError:
+    AppHelper = None
     HAS_APP_HELPER = False
-
-# ============================================================
-# 設定
-# ============================================================
-
-# 設定ファイルから読み込み
-APP_CONFIG = load_config()
-
-configure_llm(APP_CONFIG)
-
 
 # ============================================================
 # メニューバーアプリ
@@ -101,34 +75,56 @@ class _HeadlessMenuItem:
 
 
 class VoiceInputApp(rumps.App):
-    def __init__(self, recognizer=None, use_llm=False, headless=False, native_output=False):
+    def __init__(
+        self,
+        recognizer=None,
+        use_llm=None,
+        headless=False,
+        native_output=False,
+        config=None,
+        recording_store=None,
+    ):
         self._headless = headless
-        self._native_output = native_output
+        self.config = normalize_config(config if config is not None else load_config())
+        device_id = self.config["input_device_id"]
+        stable_id = stable_input_device_id(device_id)
+        if stable_id != device_id:
+            self.config["input_device_id"] = stable_id
+            try:
+                save_config(self.config)
+                log.info("入力マイク設定を名前で保存しました: %s", stable_id)
+            except OSError:
+                log.exception("入力マイクの移行設定を保存できませんでした")
+        if use_llm is None:
+            use_llm = self.config["use_llm"]
         if not headless:
             super().__init__(
                 "Voice Input",
                 icon=None,
                 title="🎙",
-                quit_button="終了",
+                quit_button=None,
             )
         else:
             self.title = "VI"
             self.icon = None
-        self.recognizer = recognizer
         self.use_llm = use_llm
-        self.is_recording = False
-        self._stream = None
-        self._process_thread = None
+        self._control_lock = threading.RLock()
+        self._shutting_down = False
+        self._session = None
+        self._unsaved_recordings = []
+        self._store = recording_store or RecordingStore()
         self._settings_ctrl = None
         self._target_app = None
         self._target_pid = None
         self._status_controller = None
-        self._has_audio_started = False
-        self._start_requested_at = None
         self._audio_activity = AudioActivityTracker()
-        self._recorded_chunks = []
-        self._recording_lock = threading.Lock()
-        self._recognizer_lock = threading.Lock()
+        self._audio_status = AudioStatusDispatcher(self._on_audio_started, self._update_live_audio_status)
+        self._recorder = BufferedAudioRecorder(
+            on_audio_started=self._audio_status.started,
+            on_live_samples=self._audio_status.samples,
+        )
+        self._transcription = TranscriptionService(self.config, recognizer=recognizer)
+        self._delivery = TextDeliveryService(native_output=native_output)
 
         self._hotkey_listener = None
 
@@ -151,6 +147,8 @@ class VoiceInputApp(rumps.App):
                 None,
                 self.llm_status,
                 self.settings_button,
+                rumps.MenuItem("録音履歴を開く", callback=self.open_history),
+                rumps.MenuItem("終了", callback=self.quit_app),
             ]
 
         call_after = AppHelper.callAfter if HAS_APP_HELPER else None
@@ -165,8 +163,22 @@ class VoiceInputApp(rumps.App):
             timer_factory=timer_factory,
         )
 
-        # ホットキー登録
-        self._register_hotkey()
+        self._processor = RecordingProcessor(
+            self._store, self._transcription, self._delivery,
+            on_status=self._set_processing_status,
+            on_finished=self._restore_recording_status,
+            notify=notify_user,
+        )
+        self._processor.start()
+
+        # In native/headless mode the Objective-C status app owns the global hotkey.
+        # Registering a second Python listener can cause duplicate toggles and extra
+        # accessibility/input-monitoring prompts.
+        if not self._headless:
+            self._register_hotkey()
+
+        self._audio_monitor = AudioDeviceMonitor(self._maintain_audio_stream)
+        self._audio_monitor.start()
 
     def _set_status(self, status, force=False):
         self._status_controller.set(status, force=force)
@@ -178,48 +190,44 @@ class VoiceInputApp(rumps.App):
         return self._status_controller.current()
 
     def _restore_recording_status(self):
-        self._status_controller.restore_recording_status(self.is_recording)
+        with self._control_lock:
+            self._set_status(LISTENING if self.is_recording else
+                             PROCESSING if self._processor.busy else IDLE)
+
+    def _set_processing_status(self, status):
+        with self._control_lock:
+            if not self.is_recording:
+                self._set_status(status)
+
+    @property
+    def is_recording(self):
+        return self._recorder.is_recording
 
     def _get_hotkey_display(self):
         """設定からホットキーの表示文字列を取得"""
-        from voice_input_tool.settings_ui import hotkey_to_display
-        hotkey = APP_CONFIG.get("hotkey_record", "<ctrl>+<shift>+<space>")
+        hotkey = self.config.get("hotkey_record", DEFAULT_RECORD_HOTKEY)
         return hotkey_to_display(hotkey)
 
-    def _ensure_audio_stream(self):
-        if self._stream is not None:
-            return True
-
-        try:
-            input_device = resolve_input_device(APP_CONFIG.get("input_device_id", ""))
-            if input_device is None:
-                log.error("利用可能な入力マイクが見つかりません")
-                return False
-
-            self._stream = sd.InputStream(
-                device=input_device,
-                samplerate=SAMPLE_RATE,
-                channels=CHANNELS,
-                blocksize=BLOCK_SIZE,
-                dtype="float32",
-                callback=self._audio_callback,
-            )
-            self._stream.start()
-            device_label = sd.query_devices(input_device).get("name", str(input_device))
-            log.info("オーディオストリーム準備完了: %s", device_label)
-            return True
-        except Exception as e:
-            log.error(f"オーディオストリーム準備エラー: {e}")
-            self._stream = None
-            return False
-
     def _close_audio_stream(self):
-        if self._stream:
-            try:
-                self._stream.stop()
-                self._stream.close()
-            finally:
-                self._stream = None
+        self._recorder.close()
+
+    def prepare_audio_stream(self):
+        """Keep a live input buffer so speech at hotkey time is not lost."""
+        with self._control_lock:
+            if self._shutting_down or self.is_recording or self._recorder.is_stopping:
+                return False
+            prepared = self._recorder.ensure_stream(self.config.get("input_device_id", ""))
+            if prepared:
+                log.info(
+                    "待機中マイクストリームを事前準備しました: pre_roll=%.2fs",
+                    PRE_ROLL_SECONDS,
+                )
+            return prepared
+
+    def _maintain_audio_stream(self):
+        with self._control_lock:
+            if not self._shutting_down:
+                self._recorder.ensure_stream(self.config.get("input_device_id", ""))
 
     def _register_hotkey(self):
         """グローバルホットキーを登録"""
@@ -232,7 +240,7 @@ class VoiceInputApp(rumps.App):
             self._hotkey_listener.stop()
             self._hotkey_listener = None
 
-        hotkey = APP_CONFIG.get("hotkey_record", "<ctrl>+<shift>+<space>")
+        hotkey = self.config.get("hotkey_record", DEFAULT_RECORD_HOTKEY)
         log.info(f"ホットキー登録: {hotkey}")
 
         try:
@@ -245,186 +253,93 @@ class VoiceInputApp(rumps.App):
             log.error(f"ホットキー登録エラー: {e}")
 
     def toggle_recording(self, sender=None, target_pid=None):
-        if self.is_recording:
-            self.stop_recording()
-        else:
-            self.start_recording(target_pid=target_pid)
+        with self._control_lock:
+            if self.is_recording:
+                self.stop_recording()
+            else:
+                self.start_recording(target_pid=target_pid)
 
     def start_recording(self, target_pid=None):
-        if self.is_recording:
-            return
-        if self._process_thread and self._process_thread.is_alive():
-            log.info("前回の音声処理中のため録音開始をスキップ")
-            return
-        self._audio_activity.reset()
-        with self._recording_lock:
-            self._recorded_chunks = []
-        self._target_pid = target_pid if target_pid and target_pid > 0 else None
-        self._target_app = None if self._target_pid else get_frontmost_application()
-        self._has_audio_started = False
-        self._start_requested_at = time.time()
-        self._set_status("starting")
-        log.info("録音開始要求: target_pid=%s", self._target_pid or app_target_pid(self._target_app))
-
-        self.is_recording = True
-        if not self._ensure_audio_stream():
-            self.is_recording = False
-            self._has_audio_started = False
-            self._start_requested_at = None
-            self._set_status("idle")
-            return
+        with self._control_lock:
+            if self._shutting_down or self.is_recording or self._recorder.is_stopping:
+                return
+            self._audio_activity.reset()
+            self._target_pid = target_pid if target_pid and target_pid > 0 else None
+            self._target_app = None if self._target_pid else get_frontmost_application()
+            pid = self._target_pid or app_target_pid(self._target_app)
+            self._set_status(STARTING)
+            journal = None
+            recording_id = None
+            try:
+                recording_id = self._store.create(
+                    target_pid=pid,
+                    use_llm=self.use_llm,
+                    asr_backend=self.config.get("asr_backend", "reazonspeech"),
+                    correction_provider="openai" if self.use_llm else None,
+                )
+                journal = self._store.open_audio(recording_id)
+                if not self._recorder.start(self.config.get("input_device_id", ""), audio_sink=journal):
+                    raise RuntimeError("マイクを開始できませんでした")
+                self._session = (recording_id, journal, self._target_app)
+                log.info("録音開始: id=%s target_pid=%s", recording_id, pid)
+            except Exception as error:
+                log.exception("録音を開始できませんでした")
+                if journal is not None:
+                    try:
+                        journal.finish()
+                    except OSError:
+                        log.exception("未開始の録音ファイルを閉じられませんでした")
+                if recording_id is not None:
+                    try:
+                        self._store.update(recording_id, state="failed", error=str(error))
+                    except OSError:
+                        log.exception("録音開始エラーを保存できませんでした")
+                self._restore_recording_status()
+                notify_user("Voice Input", "録音を開始できませんでした", str(error))
 
     def stop_recording(self):
-        if not self.is_recording:
-            return
-        with self._recording_lock:
-            self.is_recording = False
-            recorded_chunks = self._recorded_chunks
-            self._recorded_chunks = []
-
-        target_app = self._target_app
-        target_pid = self._target_pid
-        self._has_audio_started = False
-        self._start_requested_at = None
-        self._audio_activity.reset()
-
-        if not recorded_chunks:
-            self._set_status("idle")
-            log.info("録音停止: 音声データなし")
-            return
-
-        duration = sum(len(chunk) for chunk in recorded_chunks) / SAMPLE_RATE
-        log.info("録音停止: %.1f秒 target_pid=%s", duration, target_pid or app_target_pid(target_app))
-        self._set_status("processing")
-        self._process_thread = threading.Thread(
-            target=self._process_recording_after_stop,
-            args=(recorded_chunks, target_app, target_pid),
-            daemon=True,
-        )
-        self._process_thread.start()
-
-    def _audio_callback(self, indata, frames, time_info, status):
-        if status:
-            log.warning(f"オーディオステータス: {status}")
-        samples = indata[:, 0].astype(np.float32)
-        with self._recording_lock:
+        with self._control_lock:
             if not self.is_recording:
                 return
-            self._recorded_chunks.append(samples.copy())
+            self._set_status(PROCESSING)
+            recording = self._recorder.stop()
+            if recording is None:
+                return
+            recording_id, journal, target_app = self._session
+            self._session = None
+            self._audio_activity.reset()
+            try:
+                try:
+                    journal.finish()
+                except OSError:
+                    # The in-memory copy is retained until a full durable save succeeds.
+                    self._store.save_audio(recording_id, recording.chunks)
+                self._store.update(recording_id, duration_seconds=recording.duration_seconds)
+                self._processor.submit(recording_id, target_app)
+                log.info("録音保存完了: id=%s duration=%.2fs", recording_id, recording.duration_seconds)
+            except Exception:
+                self._unsaved_recordings.append((recording_id, recording))
+                log.exception("録音保存に失敗しました。メモリ内の音声を保持します: %s", recording_id)
+                notify_user("Voice Input", "録音の保存に失敗しました", "空き容量を確認してください。音声は終了までメモリに保持します。")
+            self._restore_recording_status()
 
-        if not self._has_audio_started:
-            self._has_audio_started = True
-            if self._start_requested_at is not None:
-                elapsed = time.time() - self._start_requested_at
-                log.info(f"入力待機開始 ({elapsed:.2f}s)")
-            self._set_status("listening")
-            log.info("音声データ受信開始")
-        self._update_live_audio_status(samples)
+    def _on_audio_started(self, elapsed):
+        if not self.is_recording or self._recorder.is_stopping:
+            return
+        log.info("入力待機開始 (%.2fs)", elapsed)
+        self._set_status(LISTENING)
+        log.info("音声データ受信開始")
 
     def _update_live_audio_status(self, samples):
+        if not self.is_recording or self._recorder.is_stopping:
+            return
         new_status = self._audio_activity.status_for_samples(samples, self._current_status())
         if new_status is not None:
             self._set_status(new_status)
 
-    def _process_recording_after_stop(self, recorded_chunks, target_app, target_pid):
-        speech_samples = np.concatenate(recorded_chunks).astype(np.float32, copy=False)
-        self._handle_speech_segment(speech_samples, target_app, target_pid)
-
-    def _ensure_recognizer(self):
-        if self.recognizer is not None:
-            return self.recognizer
-
-        with self._recognizer_lock:
-            if self.recognizer is not None:
-                return self.recognizer
-
-            log.info("ASRモデル読み込み開始")
-            start = time.time()
-            self.recognizer = create_recognizer()
-            log.info("ASRモデル読み込み完了 (%.1fs)", time.time() - start)
-            return self.recognizer
-
-    def _handle_speech_segment(self, speech_samples, target_app, target_pid_value=None):
-        try:
-            self._set_status("processing")
-            start = time.time()
-            recognizer = self._ensure_recognizer()
-            text = recognize_speech(recognizer, speech_samples)
-            elapsed = time.time() - start
-
-            if not text:
-                log.info(f"ASR ({elapsed:.2f}s): 認識結果なし")
-                return
-
-            log.info(f"ASR ({elapsed:.2f}s): {text}")
-            text = self._text_for_insert(text)
-            if not text:
-                return
-
-            if self._native_output:
-                self._set_status("inserting")
-                self._send_text_to_native_app(text, target_app, target_pid_value)
-                if not native_paste_bridge_ready():
-                    log.warning("ネイティブ貼り付け受信側が未起動のためPython側で貼り付けます")
-                    inserted = insert_text_at_cursor(text, target_app)
-                    if inserted:
-                        log.info("Python経由でカーソル位置に入力しました")
-                    else:
-                        notify_user(
-                            "Voice Input",
-                            "アクセシビリティ許可が必要です",
-                            "Python または VoiceInputTool を許可してください",
-                        )
-                return
-
-            self._set_status("inserting")
-            inserted = insert_text_at_cursor(text, target_app)
-            if inserted:
-                log.info("カーソル位置に入力しました")
-            notify_user(
-                "Voice Input",
-                "カーソル位置に入力しました" if inserted else "貼り付け不可のためコピーしました",
-                text[:100],
-            )
-        except Exception:
-            log.exception("発話セグメント処理で予期しないエラーが発生しました")
-            notify_user(
-                "Voice Input",
-                "音声入力処理でエラーが発生しました",
-                "詳細はログを確認してください",
-            )
-        finally:
-            self._restore_recording_status()
-
-    def _send_text_to_native_app(self, text, target_app=None, target_pid_value=None):
-        pid = target_pid_value if target_pid_value and target_pid_value > 0 else app_target_pid(target_app)
-
-        try:
-            write_output(text, pid)
-            log.info("ネイティブ貼り付けへ送信: pid=%s text=%r", pid, truncate_for_log(text, 300))
-        except Exception:
-            log.exception("ネイティブ貼り付けへの送信に失敗しました")
-            copy_to_clipboard(text)
-            notify_user("Voice Input", "貼り付けに失敗したためコピーしました", text[:100])
-
-    def _text_for_insert(self, text):
-        if not self.use_llm:
-            return text
-
-        self._set_status("correcting")
-        try:
-            corrected = llm_correct(text)
-        except Exception as e:
-            log.exception("LLM補正に失敗しました: %s", e)
-            notify_user(
-                "Voice Input",
-                "LLM補正に失敗しました",
-                str(e)[:100],
-            )
-            return ""
-
-        log.info(f"LLM補正: {corrected}")
-        return corrected
+    def open_history(self, sender=None):
+        import subprocess
+        subprocess.Popen(["open", str(self._store.root)])
 
     def open_settings(self, sender=None):
         from voice_input_tool.settings_ui import SettingsWindowController
@@ -435,208 +350,57 @@ class VoiceInputApp(rumps.App):
 
     def toggle_llm(self, sender=None):
         """メニューから LLM 補正のON/OFFを切り替え、即時保存"""
-        global APP_CONFIG
         self.use_llm = not self.use_llm
         self.llm_status.title = "LLM補正: ON" if self.use_llm else "LLM補正: OFF"
-        APP_CONFIG["use_llm"] = self.use_llm
+        self.config["use_llm"] = self.use_llm
         try:
-            save_config(APP_CONFIG)
+            save_config(self.config)
         except Exception as e:
             log.error(f"設定保存に失敗しました: {e}")
         self._set_status(self._current_status(), force=True)
 
     def _on_settings_saved(self, new_config):
-        global APP_CONFIG
-        APP_CONFIG = new_config
-        self.use_llm = new_config["use_llm"]
-        configure_llm(new_config)
+        with self._control_lock:
+            self._apply_settings(new_config)
+
+    def _apply_settings(self, new_config):
+        self.config = normalize_config(new_config)
+        self.use_llm = self.config["use_llm"]
+        self._transcription.configure(self.config)
         self.llm_status.title = "LLM補正: ON" if self.use_llm else "LLM補正: OFF"
         if not self.is_recording:
             self._close_audio_stream()
+            self.prepare_audio_stream()
         # ホットキー再登録
-        self._register_hotkey()
+        if not self._headless:
+            self._register_hotkey()
         self._set_status(self._current_status(), force=True)
         log.info(f"設定更新: LLM={'ON' if self.use_llm else 'OFF'}, "
-                 f"ホットキー={new_config.get('hotkey_record')}, "
-                 f"入力マイク={new_config.get('input_device_id', '') or '自動選択'}")
+                 f"ホットキー={self.config.get('hotkey_record')}, "
+                 f"入力マイク={self.config.get('input_device_id', '') or '自動選択'}")
 
-    def quit_app(self):
-        self.stop_recording()
+    def shutdown(self):
+        with self._control_lock:
+            if self._shutting_down:
+                return
+            self._shutting_down = True
+            self.stop_recording()
+            for recording_id, recording in self._unsaved_recordings[:]:
+                try:
+                    self._store.save_audio(recording_id, recording.chunks)
+                    self._store.update(recording_id, state="queued")
+                    self._unsaved_recordings = [item for item in self._unsaved_recordings if item[0] != recording_id]
+                except Exception:
+                    log.exception("終了時の録音再保存に失敗しました: %s", recording_id)
+        # Join outside the control lock: a monitor tick may be waiting for it.
+        self._audio_monitor.close()
+        self._processor.shutdown()
+        self._audio_status.close()
         self._stop_status_icon_animation()
         self._close_audio_stream()
+        if self._hotkey_listener:
+            self._hotkey_listener.stop()
+
+    def quit_app(self, sender=None):
+        self.shutdown()
         rumps.quit_application()
-
-
-# ============================================================
-# テストモード
-# ============================================================
-
-def run_test(recognizer, use_llm=False):
-    """テストWAVファイルでASRを検証"""
-    test_dir = os.path.join(MODEL_DIR, "test_wavs")
-    transcript_path = os.path.join(test_dir, "transcript.txt")
-
-    transcripts = {}
-    if os.path.exists(transcript_path):
-        with open(transcript_path, "r") as f:
-            for line in f:
-                parts = line.strip().split(maxsplit=1)
-                if len(parts) == 2:
-                    transcripts[parts[0]] = parts[1]
-
-    print("=== テストモード ===\n")
-
-    for i in range(1, 6):
-        wav_path = os.path.join(test_dir, f"{i}.wav")
-        if not os.path.exists(wav_path):
-            continue
-
-        with wave.open(wav_path, "rb") as wf:
-            assert wf.getframerate() == SAMPLE_RATE
-            assert wf.getnchannels() == 1
-            raw = wf.readframes(wf.getnframes())
-            samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-
-        start = time.time()
-        text = recognize_speech(recognizer, samples)
-        elapsed = time.time() - start
-
-        expected = transcripts.get(f"{i}.wav", "")
-
-        print(f"--- テスト {i} ({len(samples)/SAMPLE_RATE:.1f}s) ---")
-        print(f"正解: {expected}")
-        print(f"認識: {text}")
-        print(f"時間: {elapsed:.2f}s")
-
-        if use_llm:
-            try:
-                corrected = llm_correct(text)
-                print(f"補正: {corrected}")
-            except Exception as e:
-                print(f"補正エラー: {e}")
-        print()
-
-    print("=== テスト完了 ===")
-
-
-def run_settings_window():
-    if not HAS_APP_HELPER:
-        print("PyObjCTools が利用できないため設定画面を開けません。", file=sys.stderr)
-        return 1
-
-    from Cocoa import NSApplication
-    from voice_input_tool.settings_ui import SettingsWindowController
-
-    app = NSApplication.sharedApplication()
-    ctrl = SettingsWindowController.alloc().initWithCallback_(lambda _config: AppHelper.stopEventLoop())
-    ctrl.show()
-    app.activateIgnoringOtherApps_(True)
-    AppHelper.runEventLoop()
-    return 0
-
-
-def run_headless_app(use_llm=False):
-    app = VoiceInputApp(use_llm=use_llm, headless=True, native_output=True)
-    app._set_status("idle", force=True)
-
-    try:
-        ensure_bridge_files()
-        command_reader = NativeCommandReader()
-    except Exception:
-        log.exception("コマンドファイルの準備に失敗しました")
-        raise
-
-    should_quit = threading.Event()
-
-    def handle_signal(_signum, _frame):
-        should_quit.set()
-
-    signal.signal(signal.SIGTERM, handle_signal)
-    signal.signal(signal.SIGINT, handle_signal)
-    log.info("ヘッドレス音声入力エンジン起動: command_file=%s", command_reader.path)
-    if not native_paste_bridge_ready():
-        request_accessibility_permission(prompt=True)
-
-    try:
-        while not should_quit.is_set():
-            time.sleep(0.2)
-            try:
-                commands = command_reader.read_new_commands()
-                if not commands:
-                    continue
-            except Exception:
-                log.exception("コマンドファイルの読み込みに失敗しました")
-                continue
-
-            for command_line in commands:
-                parsed_command = parse_command_line(command_line)
-                if not parsed_command:
-                    continue
-                command = parsed_command["command"]
-                command_target_pid = parsed_command["target_pid"]
-                log.info("コマンド受信: %s target_pid=%s", command, command_target_pid)
-                if command == "toggle":
-                    app.toggle_recording(target_pid=command_target_pid)
-                elif command == "start":
-                    app.start_recording(target_pid=command_target_pid)
-                elif command == "stop":
-                    app.stop_recording()
-                elif command == "toggle_llm":
-                    app.toggle_llm()
-                elif command == "quit":
-                    should_quit.set()
-                else:
-                    log.warning("未知のコマンド: %s", command)
-    finally:
-        app.stop_recording()
-        app._stop_status_icon_animation()
-        app._close_audio_stream()
-        log.info("ヘッドレス音声入力エンジン終了")
-
-
-# ============================================================
-# メイン
-# ============================================================
-
-def main():
-    parser = argparse.ArgumentParser(description="Voice Input Tool - ReazonSpeech ASR")
-    parser.add_argument("--llm", action="store_true", help="LLM句読点補正を有効化")
-    parser.add_argument("--no-llm", action="store_true", help="LLM句読点補正を無効化")
-    parser.add_argument("--test", action="store_true", help="テストWAVファイルで動作確認")
-    parser.add_argument("--headless", action="store_true", help="メニューバーなしで音声入力エンジンのみ起動")
-    parser.add_argument("--settings", action="store_true", help="設定画面だけを開く")
-    args = parser.parse_args()
-
-    use_llm = (args.llm or APP_CONFIG.get("use_llm", False)) and not args.no_llm
-
-    if args.settings:
-        sys.exit(run_settings_window())
-
-    log.info(f"LLM補正: {'ON' if use_llm else 'OFF'}")
-
-    if args.test:
-        log.info("ASRモデル読み込み開始")
-        start = time.time()
-        recognizer = create_recognizer()
-        log.info(f"ASRモデル読み込み完了 ({time.time()-start:.1f}s)")
-        run_test(recognizer, use_llm=use_llm)
-    elif args.headless:
-        run_headless_app(use_llm=use_llm)
-    else:
-        install_status_bar_diagnostics()
-        if HAS_APPKIT_APPLICATION:
-            try:
-                NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
-                log.info("アプリ表示モード: accessory")
-            except Exception:
-                log.exception("アプリ表示モードの設定に失敗しました")
-        if HAS_APP_HELPER:
-            AppHelper.callLater(2.0, lambda: log.info("メニューバーイベントループ稼働中"))
-        app = VoiceInputApp(use_llm=use_llm)
-        log.info("メニューバーイベントループ開始")
-        app.run()
-        log.error("メニューバーイベントループが終了しました")
-
-
-if __name__ == "__main__":
-    main()

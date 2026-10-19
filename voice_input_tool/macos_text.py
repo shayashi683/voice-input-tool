@@ -20,7 +20,7 @@ try:
         kCGEventFlagMaskCommand,
         kCGHIDEventTap,
     )
-    from AppKit import NSApplicationActivateIgnoringOtherApps, NSWorkspace
+    from AppKit import NSApplicationActivateIgnoringOtherApps, NSWorkspace, NSRunningApplication
 
     HAS_CURSOR_INSERT = True
 except ImportError:
@@ -35,6 +35,12 @@ def get_frontmost_application():
     except Exception as e:
         log.warning("前面アプリ取得エラー: %s", e)
         return None
+
+
+def application_for_pid(pid):
+    if not HAS_CURSOR_INSERT:
+        return None
+    return NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
 
 
 def insert_text_at_cursor(text, target_app=None):
@@ -54,12 +60,16 @@ def insert_text_at_cursor(text, target_app=None):
             return False
     except Exception as e:
         log.warning("アクセシビリティ権限確認エラー: %s", e)
+        return False
 
     try:
         if target_app is not None:
             target_app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
-            time.sleep(0.12)
-        type_text_directly(text, target_app)
+            time.sleep(0.25)
+            if target_pid(get_frontmost_application()) != target_pid(target_app):
+                log.warning("貼り付け対象を前面化できません。テキストはコピー済みです")
+                return False
+        send_paste_shortcut()
         return True
     except Exception as e:
         log.error("カーソル位置への入力に失敗しました: %s", e)
@@ -88,7 +98,13 @@ def send_paste_shortcut(target_app=None):
     if not HAS_CURSOR_INSERT:
         return
 
-    pid = target_pid(target_app)
+    if target_app is not None:
+        try:
+            target_app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+            time.sleep(0.25)
+        except Exception as e:
+            log.warning("貼り付け対象アプリの前面化に失敗しました: %s", e)
+
     command_keycode = 55
     v_keycode = 9
     flags = kCGEventFlagMaskCommand
@@ -99,8 +115,9 @@ def send_paste_shortcut(target_app=None):
         (v_keycode, False, flags),
         (command_keycode, False, 0),
     ):
-        post_key_event(keycode, key_down, event_flags, pid=pid)
+        post_key_event(keycode, key_down, event_flags)
         time.sleep(0.01)
+    log.info("貼り付けショートカット送信")
 
 
 def post_key_event(keycode, key_down, flags=0, pid=None):

@@ -16,9 +16,9 @@
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0</string>
+  <string>1.0.12</string>
   <key>CFBundleVersion</key>
-  <string>1.0</string>
+  <string>1.0.12</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSUIElement</key>
@@ -26,6 +26,6 @@
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSMicrophoneUsageDescription</key>
-  <string>VoiceInputTool needs microphone access for speech recognition.</string>
+  <string>音声を文字に変換するためにマイクを使用します。</string>
 </dict>
 </plist>

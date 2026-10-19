@@ -1,11 +1,38 @@
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <limits.h>
+
+static void path_join(char *buffer, size_t buffer_size, const char *base, const char *relative) {
+    snprintf(buffer, buffer_size, "%s/%s", base, relative);
+}
 
 int main(void) {
-    chdir("/Users/shogohayashi/voice-input-tool");
+    const char *work_dir = getenv("VOICE_INPUT_TOOL_DIR");
+    char default_work_dir[PATH_MAX];
+    if (!work_dir || strlen(work_dir) == 0) {
+        const char *home = getenv("HOME");
+        if (!home || strlen(home) == 0) {
+            home = ".";
+        }
+        path_join(default_work_dir, sizeof(default_work_dir), home, "voice-input-tool");
+        work_dir = default_work_dir;
+    }
+    setenv("VOICE_INPUT_TOOL_DIR", work_dir, 0);
+    chdir(work_dir);
 
-    FILE *launcher_log = fopen("/Users/shogohayashi/voice-input-tool/logs/app-launcher.log", "a");
+    char launcher_log_path[PATH_MAX];
+    char launcher_error_log_path[PATH_MAX];
+    char python_path[PATH_MAX];
+    char script_path[PATH_MAX];
+    path_join(launcher_log_path, sizeof(launcher_log_path), work_dir, "logs/app-launcher.log");
+    path_join(launcher_error_log_path, sizeof(launcher_error_log_path), work_dir, "logs/app-launcher-error.log");
+    path_join(python_path, sizeof(python_path), work_dir, ".venv-framework/bin/python3");
+    path_join(script_path, sizeof(script_path), work_dir, "voice_input.py");
+
+    FILE *launcher_log = fopen(launcher_log_path, "a");
     if (launcher_log) {
         time_t now = time(NULL);
         fprintf(launcher_log, "launcher started at %ld\n", (long)now);
@@ -13,12 +40,12 @@ int main(void) {
         fclose(launcher_log);
     }
 
-    freopen("/Users/shogohayashi/voice-input-tool/logs/app-launcher.log", "a", stdout);
-    freopen("/Users/shogohayashi/voice-input-tool/logs/app-launcher-error.log", "a", stderr);
+    freopen(launcher_log_path, "a", stdout);
+    freopen(launcher_error_log_path, "a", stderr);
 
     char *const args[] = {
-        "/Users/shogohayashi/voice-input-tool/.venv-framework/bin/python3",
-        "/Users/shogohayashi/voice-input-tool/voice_input.py",
+        python_path,
+        script_path,
         "--llm",
         NULL,
     };
